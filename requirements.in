@@ -1,0 +1,8 @@
+pandas
+numpy
+jupyterlab
+matplotlib
+seaborn
+pytest
+ruff
+black

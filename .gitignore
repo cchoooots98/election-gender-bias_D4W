@@ -1,0 +1,30 @@
+﻿
+
+# Python virtual envs / builds / MLflow runs
+.venv/
+.venv*/
+venv/
+env/
+.env
+build/
+dist/
+mlruns/
+model_dir/
+
+# Caches
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+
+# temporary JSON dumps
+*.log
+*.tmp
+.streamlit/
+
+# dbt
+dbt/.user.yml
+
+# local planning attachments
+plan/
