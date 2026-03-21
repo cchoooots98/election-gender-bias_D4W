@@ -118,3 +118,182 @@ DQ_MIN_ARTICLE_TEXT_LENGTH: int = int(
 # If more than 5% of rows in a key column are NULL, the silver write fails
 # with a DQ error rather than silently propagating bad data to gold.
 DQ_MAX_NULL_RATE: float = float(os.getenv("DQ_MAX_NULL_RATE", "0.05"))
+
+# ── Data source URLs ──────────────────────────────────────────────────────────
+# All download URLs live here, not scattered across ingest modules.
+# If data.gouv.fr updates a resource ID, this is the only file that changes.
+# Pattern: 12-factor app config — "store config in the environment".
+DATA_SOURCES: dict[str, dict[str, str]] = {
+    "candidates_tour1": {
+        "url": "https://www.data.gouv.fr/api/1/datasets/r/b929c2a4-18ec-4e8b-bc37-2ff346a867cd",
+        "description": "Interior Ministry: Tour 1 candidate lists, 2026 municipal elections",
+        "format": "csv",
+        "raw_filename": "candidates_tour1.csv",
+    },
+    "seats_population": {
+        "url": "https://www.data.gouv.fr/api/1/datasets/r/24b13901-052e-4e93-8694-3f071cb8df25",
+        "description": "Interior Ministry: Municipal council seats and INSEE population per commune",
+        "format": "xlsx",
+        "raw_filename": "seats_population.xlsx",
+    },
+    "rne_incumbents": {
+        "url": "https://www.data.gouv.fr/api/1/datasets/r/c5026511-0a7f-4d79-9c2f-5c61376d2c0b",
+        "description": "Interior Ministry RNE: Current mayors (sortants) as of 2026-02-27",
+        "format": "csv",
+        "raw_filename": "rne_incumbents.csv",
+        
+    },
+    "insee_cog_communes": {
+        "url": "https://www.insee.fr/fr/statistiques/fichier/8740222/v_commune_2026.csv",
+        "description": "INSEE COG 2026: Official commune codes, department codes, region codes",
+        "format": "csv",
+        "raw_filename": "insee_cog_communes.csv",
+    },
+    "candidates_tour2": {
+        "url": "https://www.data.gouv.fr/api/1/datasets/r/c7e8ced6-3d08-452e-af06-d553634b6d61",
+        "description": "Interior Ministry: Tour 2 candidate lists (optional — used for 'advanced to round 2' flag)",
+        "format": "csv",
+        "raw_filename": "candidates_tour2.csv",
+    },
+}
+
+# ── City-size stratification thresholds (resident population) ─────────────────
+# We use population municipale (resident population) rather than registered
+# voters. Rationale: (1) registered voters for 2026 are not yet available as
+# structured per-commune data; (2) for stratification the distinction is
+# negligible — registered voters track resident population within ~5%.
+# Limitation is documented in README.
+# Communes < CITY_SIZE_SMALL_THRESHOLD are EXCLUDED from the sample:
+# media coverage near these communes is near-zero and GDELT returns 0 results.
+CITY_SIZE_LARGE_THRESHOLD: int = 100_000   # ≥ 100k → 'large'
+CITY_SIZE_MEDIUM_THRESHOLD: int = 20_000   # 20k–99k → 'medium'
+CITY_SIZE_SMALL_THRESHOLD: int = 3_500     # 3.5k–20k → 'small'; < 3500 → 'excluded'
+
+# ── Sampling configuration ────────────────────────────────────────────────────
+# Target: CANDIDATE_SAMPLE_SIZE = 24 = 12F + 12M, distributed across 3 strata.
+# Matched stratified sampling (not simple random) ensures gender balance WITHIN
+# each city-size stratum — preventing the confound of "large-city men vs.
+# small-city women" that simple random sampling would produce.
+SAMPLE_LARGE_TOTAL: int = 4    # 2F + 2M  (large cities ≥ 100k)
+SAMPLE_MEDIUM_TOTAL: int = 8   # 4F + 4M  (medium cities 20k–100k)
+SAMPLE_SMALL_TOTAL: int = 12   # 6F + 6M  (small cities 3.5k–20k)
+
+# Minimum number of distinct INSEE region codes in the final sample.
+# Ensures geographic diversity — avoids a sample dominated by Île-de-France.
+SAMPLE_MIN_REGION_COUNT: int = 4
+
+# Reproducible random seed stored here so it appears in the sample manifest.
+# Changing this seed changes the sample — document any change in the commit message.
+SAMPLING_RANDOM_SEED: int = int(os.getenv("SAMPLING_RANDOM_SEED", "42"))
+
+# ── Incumbent fuzzy-matching ──────────────────────────────────────────────────
+# Minimum rapidfuzz token_sort_ratio score (0–100) to declare an RNE match.
+# 85 accepts minor spelling/accent variations while rejecting unrelated names.
+# All matches below 100 (non-exact) are logged for manual audit.
+INCUMBENT_MATCH_THRESHOLD: int = int(os.getenv("INCUMBENT_MATCH_THRESHOLD", "85"))
+
+# ── Political nuance → analytical bloc mapping ────────────────────────────────
+# CODENUA codes are the Interior Ministry's official political affiliation codes.
+# We collapse them into 5 analytical blocs for the regression model.
+# Source: https://www.interieur.gouv.fr/Elections/Les-resultats/Municipales
+# Keeping this map in settings.py means adding/renaming a nuance code requires
+# changing exactly one file — not hunting through transform logic.
+NUANCE_GROUP_MAP: dict[str, str] = {
+    # Left bloc
+    "SOC": "gauche",
+    "DVG": "gauche",
+    "RDG": "gauche",
+    "COM": "gauche",
+    "ECO": "gauche",
+    "VEC": "gauche",
+    "NUA": "gauche",
+    # Centre
+    "REN": "centre",
+    "MDM": "centre",
+    "UDI": "centre",
+    "UVC": "centre",
+    # Right bloc
+    "LR": "droite",
+    "DVD": "droite",
+    "DSV": "droite",
+    # Hard-right
+    "RN": "extreme_droite",
+    "UXD": "extreme_droite",
+    # Various
+    "DVC": "divers",
+    "DIV": "divers",
+}
+
+# ── Column name maps (defaults — updated after Notebook EDA confirms actuals) ──
+# These are the EXPECTED raw column names from each source file, mapped to the
+# canonical silver-layer names defined in CLAUDE.md §11.
+# If actual column names differ (discovered in notebooks/02_source_schema_exploration.ipynb),
+# update these dicts — the transform modules use them as the sole rename layer.
+COG_COLUMN_MAP: dict[str, str] = {
+    "COM": "commune_insee",
+    "LIBELLE": "commune_name",
+    "DEP": "dep_code",
+    "REG": "reg_code",
+    "TYPECOM": "typecom",      # 'COM', 'ARM', 'COMA' etc — filtered to 'COM' in silver
+}
+
+# Column maps confirmed by running notebooks/02_source_schema_exploration.ipynb
+# on 2026-03-21. Source: Interior Ministry elections.interieur.gouv.fr + data.gouv.fr.
+
+SEATS_COLUMN_MAP: dict[str, str] = {
+    "CODE_DPT":          "dep_code",
+    "LIB_DPT":           "dep_name",
+    "CODE_EPCI":         "epci_code",
+    "LIB_EPCI":          "epci_name",
+    "CODE_COMMUNE":      "commune_insee",           # 5-char string; join key to COG
+    "LIB_COMMUNE":       "commune_name",
+    "CODE_COM_ASSOCIEE": "associated_commune_code",
+    "LIB_COM_ASSOCIEE":  "associated_commune_name",
+    "NBRE_BV":           "polling_station_count",
+    "POPULATION":        "population",              # resident pop — used for city-size bucket
+    "INSCRITS":          "registered_voters",       # not used in sampling; kept for analysis
+    "NBRE_SAP_COM":      "seats_municipal",
+    "NBRE_SAP_EPCI":     "seats_epci",
+}
+
+# Used for both Tour 1 (analysis pool) and Tour 2 (advanced_to_tour2 flag only).
+# Tour 1 and Tour 2 have identical schemas (17 columns, confirmed by EDA).
+CANDIDATES_COLUMN_MAP: dict[str, str] = {
+    "Code département":                "dep_code",
+    "Département":                     "dep_name",
+    "Code circonscription":            "commune_insee",       # 5-digit INSEE — confirmed by EDA
+    "Circonscription":                 "commune_name",
+    "Numéro de panneau":               "list_id",
+    "Libellé abrégé de liste":         "list_label_short",
+    "Libellé de la liste":             "list_label",
+    "Code nuance de liste":            "list_nuance",          # key into NUANCE_GROUP_MAP
+    "Nuance de liste":                 "list_nuance_label",
+    "Tête de liste":                   "is_list_leader",       # 'Oui'/'Non' — authoritative flag
+    "Ordre":                           "position_on_list",     # integer rank on list; 1 = leader
+    "Sexe":                            "gender",               # 'M' or 'F'
+    "Nom sur le bulletin de vote":     "family_name",
+    "Prénom sur le bulletin de vote":  "given_name",
+    "Nationalité":                     "nationality",
+    "Code personnalité":               "personality_code",
+    "CC":                              "candidate_category",   # semantics unknown; preserved for completeness
+}
+
+# Source: mun2026-maires-sortants-20260227.csv (3.9 MB) — mayors-only extract.
+# No function/role column exists because all rows are mayors (role is implicit).
+# No function filter is needed in dim_candidate.py.
+RNE_COLUMN_MAP: dict[str, str] = {
+    "Code du département":                              "dep_code",
+    "Libellé du département":                           "dep_name",
+    "Code de la collectivité à statut particulier":     "special_collectivity_code",
+    "Libellé de la collectivité à statut particulier":  "special_collectivity_name",
+    "Code de la commune":                               "commune_insee",   # join key for incumbent matching
+    "Libellé de la commune":                            "commune_name",
+    "Nom de l'élu":                                     "family_name",
+    "Prénom de l'élu":                                  "given_name",
+    "Code sexe":                                        "gender",
+    "Date de naissance":                                "birth_date",
+    "Code de la catégorie socio-professionnelle":       "socio_professional_code",
+    "Libellé de la catégorie socio-professionnelle":    "socio_professional_label",
+    "Date de début du mandat":                          "mandate_start_date",
+    "Date de début de la fonction":                     "function_start_date",
+}
