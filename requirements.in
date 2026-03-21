@@ -1,8 +1,48 @@
-pandas
-numpy
-jupyterlab
-matplotlib
-seaborn
-pytest
-ruff
-black
+# Direct dependencies — maintained by hand.
+# Run `pip-compile requirements.in -o requirements.txt` to regenerate the lockfile.
+# Run `pip install -r requirements.txt` to install.
+#
+# NOTE: apache-airflow is intentionally excluded — its constraint system is
+# incompatible with pip-compile. Install it separately when needed:
+#   pip install apache-airflow --constraint <airflow-constraints-url>
+
+# ── Data storage ──────────────────────────────────────────────────────────────
+duckdb          # Columnar warehouse (Snowflake/BigQuery analogue — zero ops, single file)
+pyarrow         # Parquet read/write; also speeds up pandas I/O significantly
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+python-dotenv   # Loads .env into os.environ; keeps secrets out of source code
+
+# ── Data ingestion ────────────────────────────────────────────────────────────
+requests        # HTTP client for data.gouv.fr, INSEE, GDELT API calls
+trafilatura     # Battle-tested article text extractor (handles French news sites)
+
+# ── Data analysis ─────────────────────────────────────────────────────────────
+pandas          # DataFrame manipulation; used at silver/gold boundaries
+numpy           # Numerical ops; implicit dep of pandas/scipy but listed explicitly
+scipy           # Statistical tests (chi-square, Mann-Whitney U for bias testing)
+statsmodels     # Poisson and negative-binomial regression for exposure modelling
+
+# ── NLP ───────────────────────────────────────────────────────────────────────
+transformers    # HuggingFace: CamemBERT NER, DistilCamemBERT sentiment, NLI
+torch           # PyTorch backend for all transformer inference
+sentence-transformers  # Sentence-CamemBERT embeddings for article deduplication
+
+# ── dbt ───────────────────────────────────────────────────────────────────────
+dbt-duckdb      # dbt adapter for DuckDB; runs SQL models against municipal.duckdb
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+streamlit       # Python-native dashboard; no JS required
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+matplotlib      # Base plotting library
+seaborn         # Statistical visualisation on top of matplotlib
+
+# ── Notebooks ─────────────────────────────────────────────────────────────────
+jupyterlab      # EDA environment; notebooks in notebooks/ only, never imported by src/
+
+# ── Dev / quality tools ───────────────────────────────────────────────────────
+black           # Opinionated formatter — eliminates style debates
+ruff            # Linter (replaces flake8 + isort + pylint; 10-100x faster)
+pytest          # Test runner
+pip-tools       # Provides pip-compile to regenerate this lockfile

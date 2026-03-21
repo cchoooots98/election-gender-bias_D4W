@@ -1,0 +1,35 @@
+[project]
+name = "election-gender-bias-d4w"
+version = "0.1.0"
+description = "Gender bias in French media coverage of the 2026 municipal elections — data engineering + NLP portfolio project"
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+# Rule sets enabled:
+#   E  — pycodestyle errors
+#   F  — pyflakes (undefined names, unused imports)
+#   I  — isort (import order: stdlib → third-party → local)
+#   UP — pyupgrade (modernise syntax to Python 3.11+)
+#   B  — flake8-bugbear (common bugs and design issues)
+#   SIM — flake8-simplify (unnecessary complexity)
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+# E501 is ignored because black enforces line length and the two tools conflict
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

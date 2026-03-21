@@ -23,8 +23,25 @@ __pycache__/
 *.tmp
 .streamlit/
 
+# Data layers — actual data files are never committed; .gitkeep files preserve structure
+data/raw/*
+data/bronze/*
+data/silver/*
+data/gold/*
+data/cache/*
+!data/**/.gitkeep
+
+# DuckDB warehouse file — large binary, not committed
+warehouse/*.duckdb
+
 # dbt
 dbt/.user.yml
+dbt/profiles.yml
 
 # local planning attachments
 plan/
+
+
+CLAUDE.md
+*/CLAUDE.md
+.claude/
