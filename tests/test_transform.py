@@ -1,7 +1,8 @@
-"""Regression tests for src/transform/dim_commune.py and src/transform/dim_candidate.py.
+"""Tests for src/transform/dim_commune.py, src/transform/dim_candidate.py,
+and src/transform/sampling.py.
 
-Every test corresponds to a confirmed bug found during code review. The test name
-encodes the bug so future readers know what regression is being prevented.
+Regression tests encode the bug they prevent in their name. Schema tests
+verify layer contracts (silver stays lean; gold is self-contained).
 
 Hermetic design:
 - No network calls, no GPU, no writes to real data directories.
@@ -22,9 +23,26 @@ from src.transform.dim_candidate import (
     _apply_tour2_flag,
     _compute_same_name_candidate_counts,
     _match_incumbent,
+    _normalize_list_nuance_code,
     _normalize_name,
 )
 from src.transform.dim_commune import build_dim_commune
+from src.transform.sampling import build_sample
+
+
+def test_normalize_list_nuance_code_strips_leading_list_prefix():
+    """Regression: official list-level nuance codes include an ``L`` prefix.
+
+    The candidate source uses codes such as LDVG and LRN, while
+    NUANCE_GROUP_MAP is keyed by the base nuance code (DVG, RN).
+    Without this normalization every row misses the map and is backfilled
+    to ``divers``, which corrupts the political-bloc stratification.
+    """
+    assert _normalize_list_nuance_code("LDVG") == "DVG"
+    assert _normalize_list_nuance_code("LRN") == "RN"
+    assert _normalize_list_nuance_code("DVG") == "DVG"
+    assert _normalize_list_nuance_code(None) == ""
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -317,3 +335,159 @@ def test_build_dim_commune_raises_on_missing_seats_join_key(
             cog_column_map=_COG_MAP,
             seats_column_map={},  # empty map → no rename → commune_insee absent → must fail
         )
+
+
+# ── build_sample (gold schema) ────────────────────────────────────────────────
+
+# Region codes: 4 distinct values to satisfy SAMPLE_MIN_REGION_COUNT=4.
+_SAMPLE_REG_CODES = ["11", "84", "44", "24"]
+
+
+def _make_leader_rows(bucket: str, n_per_gender: int, dep_prefix: str) -> list[dict]:
+    """Build the minimum viable candidate rows for one city-size stratum.
+
+    Candidates are assigned cycling reg_codes so the 24-person sample always
+    contains ≥ 4 distinct regions without triggering geographic resampling.
+    INSEE commune codes follow the standard format: 2-digit dep + 3-digit number.
+    """
+    rows = []
+    idx = 0
+    for gender in ["F", "M"]:
+        for _j in range(n_per_gender):
+            commune = f"{dep_prefix}{idx + 1:03d}"
+            rows.append(
+                {
+                    "leader_id": f"{commune}{gender}",
+                    "full_name": f"Leader {commune} {gender}",
+                    "gender": gender,
+                    "commune_insee": commune,
+                    "city_size_bucket": bucket,
+                    "reg_code": _SAMPLE_REG_CODES[idx % len(_SAMPLE_REG_CODES)],
+                    "nuance_group": "divers",
+                    "same_name_candidate_count": 1,
+                    "list_nuance": "LDVC",
+                    "is_incumbent": False,
+                    "incumbent_match_score": 0.0,
+                    "incumbent_match_auditable": True,
+                    "advanced_to_tour2": False,
+                }
+            )
+            idx += 1
+    return rows
+
+
+@pytest.fixture
+def silver_parquets_for_sampling(tmp_path):
+    """Write minimal dim_candidate_leader + dim_commune silver Parquets for sampling tests.
+
+    Constructs exactly the minimum viable pool: 2F+2M large, 4F+4M medium,
+    6F+6M small — matching settings.py quotas exactly. With pool size == quota
+    per stratum, all candidates are selected deterministically, making the
+    test output stable across random seeds.
+
+    Commune codes:
+      large:  75001–75004  (dep 75)
+      medium: 69001–69008  (dep 69)
+      small:  35001–35012  (dep 35)
+    """
+    silver_dir = tmp_path / "silver"
+    silver_dir.mkdir(parents=True, exist_ok=True)
+
+    leader_rows = (
+        _make_leader_rows("large", 2, "75")
+        + _make_leader_rows("medium", 4, "69")
+        + _make_leader_rows("small", 6, "35")
+    )
+    leader_df = pd.DataFrame(leader_rows)
+    _write_parquet(leader_df, silver_dir / "dim_candidate_leader.parquet")
+
+    # dim_commune: one row per unique commune in the leader pool.
+    # dep_code derived from the first two characters of the INSEE code,
+    # matching the real INSEE encoding convention.
+    population_by_bucket = {"large": 150_000, "medium": 50_000, "small": 10_000}
+    commune_rows = [
+        {
+            "commune_insee": row["commune_insee"],
+            "commune_name": f"Commune {row['commune_insee']}",
+            "dep_code": row["commune_insee"][:2],
+            "reg_code": row["reg_code"],
+            "population": population_by_bucket[row["city_size_bucket"]],
+            "city_size_bucket": row["city_size_bucket"],
+            "seats_municipal": 63,
+            "seats_epci": 44,
+        }
+        for row in leader_rows
+    ]
+    commune_df = pd.DataFrame(commune_rows).drop_duplicates(subset="commune_insee")
+    _write_parquet(commune_df, silver_dir / "dim_commune.parquet")
+
+    return silver_dir
+
+
+def test_build_sample_gold_schema_includes_commune_name(
+    silver_parquets_for_sampling, tmp_path
+):
+    """Happy path: commune_name must be present in gold sample.
+
+    GDELT DOC 2.0 is a full-text search engine. News articles contain "Rennes",
+    not "35238". Without commune_name the news ingest module cannot build
+    valid search queries and would return empty or unrelated results.
+    """
+    result_df = build_sample(
+        silver_dir=silver_parquets_for_sampling,
+        gold_dir=tmp_path / "gold",
+        duckdb_path=tmp_path / "warehouse.duckdb",
+        random_seed=42,
+    )
+    assert "commune_name" in result_df.columns, (
+        "gold.sample_leaders must contain commune_name — "
+        "GDELT text queries require the human-readable commune label"
+    )
+
+
+def test_build_sample_gold_schema_includes_dep_code(
+    silver_parquets_for_sampling, tmp_path
+):
+    """Happy path: dep_code must be present in gold sample.
+
+    France contains many same-name communes (e.g. multiple "Saint-Martin").
+    dep_code narrows the GDELT search scope to the correct administrative area
+    and is also used as a covariate in regression models.
+    """
+    result_df = build_sample(
+        silver_dir=silver_parquets_for_sampling,
+        gold_dir=tmp_path / "gold",
+        duckdb_path=tmp_path / "warehouse.duckdb",
+        random_seed=42,
+    )
+    assert "dep_code" in result_df.columns, (
+        "gold.sample_leaders must contain dep_code — "
+        "needed to disambiguate same-name communes in GDELT queries"
+    )
+
+
+def test_build_sample_commune_fields_are_non_null(
+    silver_parquets_for_sampling, tmp_path
+):
+    """Boundary: commune_name and dep_code must be non-null for every sampled candidate.
+
+    A null here means a sampled commune_insee has no match in dim_commune,
+    which would silently produce an empty GDELT query string and zero articles
+    for that candidate — corrupting the exposure metric.
+    """
+    result_df = build_sample(
+        silver_dir=silver_parquets_for_sampling,
+        gold_dir=tmp_path / "gold",
+        duckdb_path=tmp_path / "warehouse.duckdb",
+        random_seed=42,
+    )
+    null_commune_names = result_df["commune_name"].isna().sum()
+    null_dep_codes = result_df["dep_code"].isna().sum()
+    assert null_commune_names == 0, (
+        f"commune_name has {null_commune_names} null values — "
+        "all sampled communes must be present in dim_commune"
+    )
+    assert null_dep_codes == 0, (
+        f"dep_code has {null_dep_codes} null values — "
+        "all sampled communes must be present in dim_commune"
+    )

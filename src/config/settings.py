@@ -247,21 +247,31 @@ NUANCE_GROUP_MAP: dict[str, str] = {
     "ECO": "gauche",
     "VEC": "gauche",
     "NUA": "gauche",
+    "FI": "gauche",  # La France insoumise (2026 code)
+    "EXG": "gauche",  # Extrême gauche (2026 code)
+    "UG": "gauche",  # Union gauche (2026 code)
     # Centre
     "REN": "centre",
     "MDM": "centre",
     "UDI": "centre",
     "UVC": "centre",
+    "HOR": "centre",  # Horizons — Macron-aligned party (2026 code)
+    "UC": "centre",  # Union centre (2026 code)
     # Right bloc
     "LR": "droite",
     "DVD": "droite",
     "DSV": "droite",
+    "UD": "droite",  # Union droite (2026 code)
+    "UDR": "droite",  # Union droites pour la République (2026 code)
     # Hard-right
     "RN": "extreme_droite",
     "UXD": "extreme_droite",
-    # Various
+    "EXD": "extreme_droite",  # Extrême droite (2026 code)
+    "REC": "extreme_droite",  # Reconquête! (2026 code)
+    # Various / regionalist
     "DVC": "divers",
     "DIV": "divers",
+    "REG": "divers",  # Régionaliste (2026 code)
 }
 
 # ── Column name maps (defaults — updated after Notebook EDA confirms actuals) ──

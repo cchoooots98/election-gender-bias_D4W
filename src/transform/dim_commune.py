@@ -17,15 +17,15 @@ This bucket is later used by the sampling algorithm to ensure gender balance
 within each city-size stratum.
 
 Column name note:
-  The actual column names in the source files are UNKNOWN until
-  notebooks/02_source_schema_exploration.ipynb is run. The column_map
-  parameters allow callers to pass the real names discovered during EDA.
-  Default maps in settings.py are placeholders that will be filled in
-  after the first pipeline run with real data.
+  Source column names were confirmed by running EDA on 2026-03-21
+  (Interior Ministry elections.interieur.gouv.fr + INSEE data.gouv.fr).
+  The confirmed maps live in settings.py (COG_COLUMN_MAP, SEATS_COLUMN_MAP)
+  and are passed as parameters so the rename layer is explicit and auditable.
 
 Industry pattern: this "config-driven transform" approach (column maps as
 parameters, not hard-coded strings) is how dbt handles source column names
-in sources.yml — the mapping is explicit and auditable.
+in sources.yml — the mapping is versioned, visible in code review, and
+decoupled from transform logic.
 """
 
 import logging

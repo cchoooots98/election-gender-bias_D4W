@@ -16,7 +16,9 @@ Outputs (silver):
   data/silver/_rejected/dim_candidate_leader_rejected.parquet  (quarantine)
 
 Key steps:
-  1. Filter Tour 1 bronze to position == 1 on list (tête de liste)
+  1. Filter Tour 1 bronze to tête de liste: prefer is_list_leader == 'Oui'
+     (Interior Ministry explicit flag); fallback to position_on_list == 1
+     only when the flag column is absent from the source file
   2. Filter to communes ≥ CITY_SIZE_SMALL_THRESHOLD (exclude <3500 pop)
   3. Join dim_commune → city_size_bucket, reg_code, population
   4. Assign nuance_group from NUANCE_GROUP_MAP
@@ -139,6 +141,31 @@ def _normalize_name(name: str) -> str:
     # Collapse multiple spaces produced by punctuation removal above.
     name = " ".join(name.split())
     return name
+
+
+def _normalize_list_nuance_code(nuance_code: str | None) -> str:
+    """Normalize official list nuance codes before bloc mapping.
+
+    The Interior Ministry candidate file stores list-level nuances with an
+    ``L`` prefix (for example ``LDVG``, ``LLR``, ``LRN``), while
+    ``NUANCE_GROUP_MAP`` is keyed by the underlying political nuance
+    (``DVG``, ``LR``, ``RN``). We keep the raw ``list_nuance`` value for
+    auditability and normalize only the mapping key used to derive
+    ``nuance_group``.
+
+    Args:
+        nuance_code: Raw list nuance code from the candidate source file.
+
+    Returns:
+        Normalized nuance code suitable for lookup in ``NUANCE_GROUP_MAP``.
+    """
+    if nuance_code is None or not isinstance(nuance_code, str):
+        return ""
+
+    normalized = nuance_code.strip().upper()
+    if normalized.startswith("L") and len(normalized) > 1:
+        return normalized[1:]
+    return normalized
 
 
 def _generate_leader_id(full_name: str, commune_insee: str) -> str:
@@ -816,13 +843,23 @@ def build_dim_candidate_leader(
     # ── Assign nuance_group ───────────────────────────────────────────────────
     nuance_col = "list_nuance" if "list_nuance" in leader_df.columns else None
     if nuance_col:
-        leader_df["nuance_group"] = leader_df[nuance_col].map(NUANCE_GROUP_MAP)
+        normalized_nuance = leader_df[nuance_col].apply(_normalize_list_nuance_code)
+        leader_df["nuance_group"] = normalized_nuance.map(NUANCE_GROUP_MAP)
         unmapped = leader_df["nuance_group"].isna().sum()
         if unmapped > 0:
+            unmapped_codes = sorted(
+                {
+                    code
+                    for code in normalized_nuance[leader_df["nuance_group"].isna()]
+                    if code
+                }
+            )
             logger.warning(
                 "%d rows have unmapped nuance codes — assigned 'divers'. "
-                "Update NUANCE_GROUP_MAP in settings.py if new codes appeared.",
+                "Normalized codes=%s. Update NUANCE_GROUP_MAP in settings.py "
+                "if new codes appeared.",
                 unmapped,
+                unmapped_codes[:10],
             )
             leader_df["nuance_group"] = leader_df["nuance_group"].fillna("divers")
     else:

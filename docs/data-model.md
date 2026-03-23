@@ -161,9 +161,11 @@ Thresholds are controlled in `src/config/settings.py`.
 
 Design note:
 - `commune_name`, `dep_code`, and `population` are intentionally excluded from
-  this table.
-- They remain authoritative in `silver.dim_commune` and are joined only when
-  needed for audit artifacts such as the sample manifest.
+  `silver.dim_candidate_leader`. They remain authoritative in `silver.dim_commune`.
+- `commune_name` and `dep_code` are joined into `gold.sample_leaders` at gold
+  write time, making the analytical cohort table self-contained for GDELT news
+  search. `population` remains join-only (used in the audit manifest); the gold
+  table stores `city_size_bucket` as the modelling-ready stratum indicator.
 
 ### `silver/_rejected/*`
 
@@ -194,6 +196,8 @@ Gold contains stable analysis-facing artifacts.
 | `full_name` | VARCHAR | Candidate name |
 | `gender` | VARCHAR(1) | `M` or `F` |
 | `commune_insee` | VARCHAR(5) | Foreign key to `silver.dim_commune` |
+| `commune_name` | VARCHAR | Human-readable commune label — joined from `silver.dim_commune` at gold write time; required for GDELT text query construction |
+| `dep_code` | VARCHAR | Department code — disambiguates same-name communes (e.g. multiple "Saint-Martin"); joined from `silver.dim_commune` at gold write time |
 | `reg_code` | VARCHAR | Region code |
 | `city_size_bucket` | VARCHAR | Sampling stratum |
 | `same_name_candidate_count` | INTEGER | Sampling-priority feature |
@@ -207,8 +211,9 @@ Gold contains stable analysis-facing artifacts.
 Companion audit artifact:
 - `data/gold/sample_manifest.json`
 - Includes run ID, random seed, per-stratum counts, region coverage, and
-  manifest-only commune fields (`commune_name`, `dep_code`, `population`)
-  joined from `silver.dim_commune`
+  per-candidate details. `population` is the only manifest-only field joined
+  from `silver.dim_commune` at manifest-write time — `commune_name` and
+  `dep_code` are already present in the gold table itself.
 
 Modeling note:
 - `gold.sample_leaders` is a **materialized cohort snapshot**, not a view.

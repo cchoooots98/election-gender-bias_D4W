@@ -1,4 +1,4 @@
-"""Stratified matched sampling: select 20–24 analysis subjects from dim_candidate_leader.
+"""Stratified matched sampling: select exactly 24 analysis subjects from dim_candidate_leader.
 
 This module implements the core methodological design decision of the project.
 
@@ -73,12 +73,15 @@ _REQUIRED_SAMPLE_COLUMNS = {
     "same_name_candidate_count",
 }
 
-_MANIFEST_DIM_COMMUNE_COLUMNS = [
-    "commune_insee",
-    "commune_name",
-    "dep_code",
-    "population",
-]
+# Columns joined from dim_commune into the gold sample at write time.
+# commune_name is required for GDELT text query construction (news search engines
+# index article text, not INSEE codes). dep_code disambiguates same-name communes
+# (France has many "Saint-Martin" etc.). Gold layer must be self-contained.
+_GOLD_DIM_COMMUNE_COLUMNS = ["commune_insee", "commune_name", "dep_code"]
+
+# Only population is joined exclusively for the manifest audit artifact.
+# commune_name and dep_code already live in the gold sample DataFrame itself.
+_MANIFEST_DIM_COMMUNE_COLUMNS = ["commune_insee", "population"]
 
 
 def _prioritize_candidate_pool(
@@ -333,23 +336,24 @@ def _build_manifest_sample_df(
     sample_df: pd.DataFrame,
     silver_dir: Path,
 ) -> pd.DataFrame:
-    """Join manifest-only commune audit fields onto the sampled leaders.
+    """Join the manifest-only population field onto the enriched gold sample.
 
-    sample_leaders.parquet intentionally keeps the lean candidate schema from
-    dim_candidate_leader. The manifest, however, is an audit artifact and must
-    include human-readable commune context. Those fields are therefore joined
-    from dim_commune only at manifest-write time.
+    commune_name and dep_code are already present in sample_df (joined into the
+    gold schema by build_sample before this function is called). Only population
+    is fetched here exclusively for the audit manifest — it is not stored in
+    gold.sample_leaders because city_size_bucket already captures the size
+    stratum needed for downstream modelling.
 
     Args:
-        sample_df: Final sampled leaders DataFrame.
+        sample_df: Gold sample DataFrame already containing commune_name and dep_code.
         silver_dir: Root silver directory.
 
     Returns:
-        Sample DataFrame enriched with manifest-only commune audit columns.
+        Sample DataFrame enriched with population for manifest-only audit output.
 
     Raises:
         FileNotFoundError: If dim_commune.parquet does not exist.
-        SamplingError: If manifest audit columns are missing or null after join.
+        SamplingError: If population or any commune field is null after join.
     """
     dim_commune_path = silver_dir / "dim_commune.parquet"
     if not dim_commune_path.exists():
@@ -364,7 +368,7 @@ def _build_manifest_sample_df(
     )
     if missing_dim_columns:
         raise SamplingError(
-            "dim_commune is missing required manifest audit columns: "
+            "dim_commune is missing required population column for manifest: "
             f"{missing_dim_columns}"
         )
 
@@ -495,11 +499,14 @@ def build_sample(
             manifest. If omitted, a UUID is generated for standalone use.
 
     Returns:
-        The sampled leaders DataFrame (24 rows).
+        The sampled leaders DataFrame (24 rows) with commune_name and dep_code
+        joined from dim_commune, making the gold table self-contained for
+        downstream GDELT query construction.
 
     Raises:
-        FileNotFoundError: If dim_candidate_leader silver file does not exist.
-        SamplingError: If gender balance or minimum sample size cannot be met.
+        FileNotFoundError: If dim_candidate_leader or dim_commune silver file does not exist.
+        SamplingError: If gender balance or minimum sample size cannot be met,
+            or if commune enrichment join produces nulls.
     """
     silver_path = silver_dir / "dim_candidate_leader.parquet"
     dim_commune_path = silver_dir / "dim_commune.parquet"
@@ -570,6 +577,37 @@ def build_sample(
 
     # ── Validate sample ───────────────────────────────────────────────────────
     _validate_sample(final_sample_df)
+
+    # ── Enrich gold sample with commune_name and dep_code ─────────────────────
+    # commune_name is required for GDELT text query construction — news search
+    # engines index article text, not INSEE codes. dep_code disambiguates same-
+    # name communes (e.g. multiple "Saint-Martin" in France). Gold layer must be
+    # self-contained: downstream modules must not need to re-join dim_commune.
+    dim_commune_df = pd.read_parquet(dim_commune_path)
+    final_sample_df = final_sample_df.merge(
+        dim_commune_df[_GOLD_DIM_COMMUNE_COLUMNS],
+        on="commune_insee",
+        how="left",
+        validate="many_to_one",
+    )
+    missing_commune_mask = (
+        final_sample_df[["commune_name", "dep_code"]].isna().any(axis=1)
+    )
+    if missing_commune_mask.any():
+        missing_communes = sorted(
+            final_sample_df.loc[missing_commune_mask, "commune_insee"]
+            .astype(str)
+            .unique()
+        )
+        raise SamplingError(
+            "commune enrichment join produced nulls for sampled communes: "
+            f"{missing_communes}. "
+            "Verify dim_commune covers all sampled commune_insee values."
+        )
+    logger.info(
+        "Gold sample enriched with commune_name and dep_code rows=%d",
+        len(final_sample_df),
+    )
 
     # ── Write gold Parquet ────────────────────────────────────────────────────
     gold_parquet_path = gold_dir / "sample_leaders.parquet"

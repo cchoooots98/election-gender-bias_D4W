@@ -128,6 +128,8 @@ erDiagram
         char    leader_id PK
         varchar gender
         varchar commune_insee FK
+        varchar commune_name
+        varchar dep_code
         varchar city_size_bucket
         integer same_name_candidate_count
     }
@@ -137,7 +139,6 @@ erDiagram
         varchar   url
         varchar   domain
         timestamp published_at
-        varchar   text
         varchar   fetch_status
         boolean   is_duplicate
         char      canonical_article_id FK
