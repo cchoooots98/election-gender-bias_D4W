@@ -1,52 +1,67 @@
-# Pipeline Architecture — Election Gender Bias D4W
+# Pipeline Architecture - Election Gender Bias D4W
 
 > Full logical data model: [`docs/data-model.md`](data-model.md)
 
 ---
 
+## Architecture Status
+
+Two architectural horizons coexist in this project:
+
+- **Implemented sampling slice**: official-data ingest -> `dim_commune` ->
+  `dim_candidate_leader` -> `gold.sample_leaders` -> `sample_manifest.json`
+- **Planned full pipeline**: sampled cohort -> GDELT article collection ->
+  NLP enrichment -> analytical marts -> Streamlit dashboard
+
+This distinction matters for portfolio honesty: the runnable script currently
+delivers the cohort-construction slice, not the entire future roadmap.
+
+---
+
 ## End-to-End Data Pipeline
 
-This diagram shows the complete data flow from ingestion through NLP to the
-Streamlit dashboard. It answers: *"Can you design a production-grade DE pipeline?"*
+This diagram shows the full intended data flow from ingestion through NLP to the
+Streamlit dashboard while explicitly surfacing the implemented cohort step.
 
 ```mermaid
 flowchart LR
     subgraph SRC["Data Sources"]
-        A1["data.gouv.fr\nCandidates · RNE · Seats"]
+        A1["data.gouv.fr<br>Candidates · RNE · Seats"]
         A2["INSEE COG 2026"]
         A3["GDELT DOC 2.0 API"]
-        A4["News websites\ntrafilatura"]
+        A4["News websites<br>trafilatura"]
     end
 
-    subgraph BRZ["🥉 Bronze  (raw copies, append-only)"]
-        B1["candidates_tour1/2\nseats_population · rne_incumbents"]
+    subgraph BRZ["Bronze (raw copies, append-only)"]
+        B1["candidates_tour1/2<br>seats_population · rne_incumbents"]
         B2["cog_communes"]
         B3["gdelt_results"]
     end
 
-    subgraph SLV["🥈 Silver  (cleaned · validated · joined)"]
+    subgraph SLV["Silver (cleaned · validated · joined)"]
         subgraph DIMS["Dimensions"]
             D1["dim_commune"]
             D2["dim_candidate_leader"]
         end
         subgraph FACTS["Facts"]
             F1["fact_article"]
-            F2["fact_mention ★"]
-            F3["fact_stereotype\n_word_counts"]
+            F2["fact_mention"]
+            F3["fact_stereotype<br>word_counts"]
         end
     end
 
-    subgraph NLP["🤖 NLP Pipeline"]
-        N1["① Dedup\nSentence-CamemBERT"]
-        N2["② NER\nCamemBERT-NER"]
-        N3["③ Context\nExtraction"]
-        N4["④ Sentiment\nDistilCamemBERT"]
-        N5["⑤ Frames\nCamemBERT-NLI × 6"]
-        N6["⑥ Stereotype\nLexicon counts"]
+    subgraph NLP["NLP Pipeline"]
+        N1["1 Dedup<br>Sentence-CamemBERT"]
+        N2["2 NER<br>CamemBERT-NER"]
+        N3["3 Context<br>Extraction"]
+        N4["4 Sentiment<br>DistilCamemBERT"]
+        N5["5 Frames<br>CamemBERT-NLI x 6"]
+        N6["6 Stereotype<br>Lexicon counts"]
         N1 --> N2 --> N3 --> N4 & N5 & N6
     end
 
-    subgraph GLD["🥇 Gold  (analysis-ready aggregates)"]
+    subgraph GLD["Gold"]
+        G0["sample_leaders ★"]
         G1["mart_exposure_metrics"]
         G2["mart_framing_metrics"]
         G3["mart_bias_indicators"]
@@ -59,22 +74,27 @@ flowchart LR
     A4 --> F1
 
     B1 & B2 --> D1 & D2
+    D2 --> G0
+    G0 --> B3
     B3 --> F1
 
     F1 --> NLP
     NLP --> F2 & F3
 
     D2 & F2 --> G1 & G2 & G3 & G4
-    G1 & G2 & G3 & G4 --> DASH["📊 Streamlit Dashboard"]
+    G1 & G2 & G3 & G4 --> DASH["Streamlit Dashboard"]
 ```
+
+**Runnable-slice note.** The implemented runner currently stops at
+`gold.sample_leaders` plus `sample_manifest.json`. The GDELT, NLP, and mart
+sections shown above remain planned extensions.
 
 ---
 
-## Silver Layer — Entity Relationship Diagram
+## Silver Layer - Entity Relationship Diagram
 
-This diagram shows the primary-key / foreign-key relationships between Silver
-tables. It answers: *"Do you understand dimensional modelling and fact/dimension
-table design?"*
+This diagram shows the primary-key / foreign-key relationships between the core
+Silver tables and the sampled cohort artifact that depends on them.
 
 ```mermaid
 erDiagram
@@ -96,11 +116,20 @@ erDiagram
         varchar commune_insee FK
         varchar city_size_bucket
         varchar reg_code
+        integer same_name_candidate_count
         varchar list_nuance
         varchar nuance_group
         boolean is_incumbent
         float   incumbent_match_score
         boolean advanced_to_tour2
+    }
+
+    SAMPLE_LEADERS {
+        char    leader_id PK
+        varchar gender
+        varchar commune_insee FK
+        varchar city_size_bucket
+        integer same_name_candidate_count
     }
 
     FACT_ARTICLE {
@@ -143,9 +172,10 @@ erDiagram
     }
 
     DIM_COMMUNE ||--o{ DIM_CANDIDATE_LEADER : "commune_insee"
+    DIM_CANDIDATE_LEADER ||--o{ SAMPLE_LEADERS : "leader_id"
     DIM_CANDIDATE_LEADER ||--o{ FACT_MENTION : "leader_id"
     FACT_ARTICLE ||--o{ FACT_MENTION : "article_id"
-    FACT_ARTICLE ||--o| FACT_ARTICLE : "canonical_article_id (self-ref)"
+    FACT_ARTICLE ||--o| FACT_ARTICLE : "canonical_article_id"
     FACT_MENTION ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
 ```
 
@@ -157,10 +187,9 @@ erDiagram
 |---|---|---|
 | Warehouse | DuckDB (single file) | Snowflake / BigQuery (local) |
 | File format | Parquet (Snappy compressed) | Delta Lake / ORC |
-| Orchestration | Apache Airflow | Prefect, Dagster |
+| Orchestration | Scripted runner now; Airflow planned | Prefect, Dagster, Airflow |
 | SQL transforms | dbt-duckdb | dbt-snowflake, dbt-bigquery |
 | French NLP | CamemBERT family (HuggingFace) | BERT (English equivalent) |
 | Text extraction | trafilatura | Scrapy, newspaper3k |
 | Dashboard | Streamlit | Tableau, Looker |
 | CI/CD | GitHub Actions | Jenkins, CircleCI |
-

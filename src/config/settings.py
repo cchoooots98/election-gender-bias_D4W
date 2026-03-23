@@ -89,9 +89,7 @@ NER_MODEL_NAME: str = os.getenv("NER_MODEL_NAME", "Jean-Baptiste/camembert-ner")
 SENTIMENT_MODEL_NAME: str = os.getenv(
     "SENTIMENT_MODEL_NAME", "cmarkea/distilcamembert-base-sentiment"
 )
-NLI_MODEL_NAME: str = os.getenv(
-    "NLI_MODEL_NAME", "BaptisteDoyen/camembert-base-xnli"
-)
+NLI_MODEL_NAME: str = os.getenv("NLI_MODEL_NAME", "BaptisteDoyen/camembert-base-xnli")
 EMBEDDING_MODEL_NAME: str = os.getenv(
     "EMBEDDING_MODEL_NAME", "dangvantuan/sentence-camembert-base"
 )
@@ -107,13 +105,11 @@ NLP_MAX_TOKEN_LENGTH: int = int(os.getenv("NLP_MAX_TOKEN_LENGTH", "512"))
 
 # ── Data quality (DQ) thresholds ─────────────────────────────────────────────
 # DQ = Data Quality. These thresholds determine when a pipeline step fails
-# vs. quarantines bad rows to a _rejected sub-table (see CLAUDE.md §6).
+# vs. quarantines bad rows to a _rejected sub-table with a _rejection_reason column.
 #
 # Articles shorter than this are likely navigation fragments or paywalled
 # stubs, not real article text — quarantine rather than analyse.
-DQ_MIN_ARTICLE_TEXT_LENGTH: int = int(
-    os.getenv("DQ_MIN_ARTICLE_TEXT_LENGTH", "100")
-)
+DQ_MIN_ARTICLE_TEXT_LENGTH: int = int(os.getenv("DQ_MIN_ARTICLE_TEXT_LENGTH", "100"))
 
 # If more than 5% of rows in a key column are NULL, the silver write fails
 # with a DQ error rather than silently propagating bad data to gold.
@@ -141,7 +137,6 @@ DATA_SOURCES: dict[str, dict[str, str]] = {
         "description": "Interior Ministry RNE: Current mayors (sortants) as of 2026-02-27",
         "format": "csv",
         "raw_filename": "rne_incumbents.csv",
-        
     },
     "insee_cog_communes": {
         "url": "https://www.insee.fr/fr/statistiques/fichier/8740222/v_commune_2026.csv",
@@ -165,18 +160,63 @@ DATA_SOURCES: dict[str, dict[str, str]] = {
 # Limitation is documented in README.
 # Communes < CITY_SIZE_SMALL_THRESHOLD are EXCLUDED from the sample:
 # media coverage near these communes is near-zero and GDELT returns 0 results.
-CITY_SIZE_LARGE_THRESHOLD: int = 100_000   # ≥ 100k → 'large'
-CITY_SIZE_MEDIUM_THRESHOLD: int = 20_000   # 20k–99k → 'medium'
-CITY_SIZE_SMALL_THRESHOLD: int = 3_500     # 3.5k–20k → 'small'; < 3500 → 'excluded'
+CITY_SIZE_LARGE_THRESHOLD: int = 100_000  # ≥ 100k → 'large'
+CITY_SIZE_MEDIUM_THRESHOLD: int = 20_000  # 20k–99k → 'medium'
+CITY_SIZE_SMALL_THRESHOLD: int = 3_500  # 3.5k–20k → 'small'; < 3500 → 'excluded'
+
+# ── PLM cities (Paris / Lyon / Marseille) — special electoral system ──────────
+# The Loi PLM (Loi n°82-1169, 31 December 1982) governs elections in France's
+# three largest cities. Unlike every other commune, voters in Paris, Lyon, and
+# Marseille elect candidates by arrondissement (sub-district), not by the city
+# as a whole. Each arrondissement has its own candidate list (tête de liste),
+# and those lists elect an arrondissement council, which in turn sends delegates
+# to the city-wide municipal council (conseil municipal), which then elects the
+# mayor.
+#
+# This creates a structural mismatch with the rest of the pipeline:
+#   - The COG (Code Officiel Géographique) represents each of the three cities
+#     as a single commune (TYPECOM == 'COM') with codes 75056 / 69123 / 13055.
+#   - The Interior Ministry candidate file uses arrondissement-level codes
+#     (75101–75120 for Paris, 69381–69389 for Lyon, 13201–13216 for Marseille).
+#   - A naive LEFT JOIN on commune_insee produces no match for any PLM candidate,
+#     silently dropping ~10 million residents from the analysis.
+#
+# Current treatment (Phase A — main analysis):
+#   PLM arrondissement candidates are explicitly excluded before the dim_commune
+#   JOIN, with a logged warning. Paris, Lyon, and Marseille are documented as a
+#   known limitation in the research output.
+#
+# Future treatment (Phase B — sensitivity analysis):
+#   Use PLM_ARRONDISSEMENT_MAP to re-attach ARM candidates to their parent
+#   commune, select one representative tête de liste per party per PLM city,
+#   add commune_type = 'plm' column, and include is_plm_city as a regression
+#   control variable. See project backlog for implementation plan.
+#
+# INSEE codes:
+#   Paris     (75056): 20 arrondissements, codes 75101–75120
+#   Lyon      (69123):  9 arrondissements, codes 69381–69389
+#   Marseille (13055): 16 arrondissements, codes 13201–13216
+PLM_ARRONDISSEMENT_MAP: dict[str, str] = {
+    # Paris arrondissements 75101–75120 → parent commune 75056
+    **{f"751{str(i).zfill(2)}": "75056" for i in range(1, 21)},
+    # Lyon arrondissements 69381–69389 → parent commune 69123
+    **{f"6938{i}": "69123" for i in range(1, 10)},
+    # Marseille arrondissements 13201–13216 → parent commune 13055
+    **{f"132{str(i).zfill(2)}": "13055" for i in range(1, 17)},
+}
+
+# The three parent commune codes — useful for quickly checking whether a
+# commune is a PLM city without iterating through PLM_ARRONDISSEMENT_MAP.
+PLM_COMMUNE_CODES: frozenset[str] = frozenset({"75056", "69123", "13055"})
 
 # ── Sampling configuration ────────────────────────────────────────────────────
 # Target: CANDIDATE_SAMPLE_SIZE = 24 = 12F + 12M, distributed across 3 strata.
 # Matched stratified sampling (not simple random) ensures gender balance WITHIN
 # each city-size stratum — preventing the confound of "large-city men vs.
 # small-city women" that simple random sampling would produce.
-SAMPLE_LARGE_TOTAL: int = 4    # 2F + 2M  (large cities ≥ 100k)
-SAMPLE_MEDIUM_TOTAL: int = 8   # 4F + 4M  (medium cities 20k–100k)
-SAMPLE_SMALL_TOTAL: int = 12   # 6F + 6M  (small cities 3.5k–20k)
+SAMPLE_LARGE_TOTAL: int = 4  # 2F + 2M  (large cities ≥ 100k)
+SAMPLE_MEDIUM_TOTAL: int = 8  # 4F + 4M  (medium cities 20k–100k)
+SAMPLE_SMALL_TOTAL: int = 12  # 6F + 6M  (small cities 3.5k–20k)
 
 # Minimum number of distinct INSEE region codes in the final sample.
 # Ensures geographic diversity — avoids a sample dominated by Île-de-France.
@@ -226,7 +266,7 @@ NUANCE_GROUP_MAP: dict[str, str] = {
 
 # ── Column name maps (defaults — updated after Notebook EDA confirms actuals) ──
 # These are the EXPECTED raw column names from each source file, mapped to the
-# canonical silver-layer names defined in CLAUDE.md §11.
+# canonical silver-layer names defined in docs/data-model.md.
 # If actual column names differ (discovered in notebooks/02_source_schema_exploration.ipynb),
 # update these dicts — the transform modules use them as the sole rename layer.
 COG_COLUMN_MAP: dict[str, str] = {
@@ -234,66 +274,66 @@ COG_COLUMN_MAP: dict[str, str] = {
     "LIBELLE": "commune_name",
     "DEP": "dep_code",
     "REG": "reg_code",
-    "TYPECOM": "typecom",      # 'COM', 'ARM', 'COMA' etc — filtered to 'COM' in silver
+    "TYPECOM": "typecom",  # 'COM', 'ARM', 'COMA' etc — filtered to 'COM' in silver
 }
 
 # Column maps confirmed by running notebooks/02_source_schema_exploration.ipynb
 # on 2026-03-21. Source: Interior Ministry elections.interieur.gouv.fr + data.gouv.fr.
 
 SEATS_COLUMN_MAP: dict[str, str] = {
-    "CODE_DPT":          "dep_code",
-    "LIB_DPT":           "dep_name",
-    "CODE_EPCI":         "epci_code",
-    "LIB_EPCI":          "epci_name",
-    "CODE_COMMUNE":      "commune_insee",           # 5-char string; join key to COG
-    "LIB_COMMUNE":       "commune_name",
+    "CODE_DPT": "dep_code",
+    "LIB_DPT": "dep_name",
+    "CODE_EPCI": "epci_code",
+    "LIB_EPCI": "epci_name",
+    "CODE_COMMUNE": "commune_insee",  # 5-char string; join key to COG
+    "LIB_COMMUNE": "commune_name",
     "CODE_COM_ASSOCIEE": "associated_commune_code",
-    "LIB_COM_ASSOCIEE":  "associated_commune_name",
-    "NBRE_BV":           "polling_station_count",
-    "POPULATION":        "population",              # resident pop — used for city-size bucket
-    "INSCRITS":          "registered_voters",       # not used in sampling; kept for analysis
-    "NBRE_SAP_COM":      "seats_municipal",
-    "NBRE_SAP_EPCI":     "seats_epci",
+    "LIB_COM_ASSOCIEE": "associated_commune_name",
+    "NBRE_BV": "polling_station_count",
+    "POPULATION": "population",  # resident pop — used for city-size bucket
+    "INSCRITS": "registered_voters",  # not used in sampling; kept for analysis
+    "NBRE_SAP_COM": "seats_municipal",
+    "NBRE_SAP_EPCI": "seats_epci",
 }
 
 # Used for both Tour 1 (analysis pool) and Tour 2 (advanced_to_tour2 flag only).
 # Tour 1 and Tour 2 have identical schemas (17 columns, confirmed by EDA).
 CANDIDATES_COLUMN_MAP: dict[str, str] = {
-    "Code département":                "dep_code",
-    "Département":                     "dep_name",
-    "Code circonscription":            "commune_insee",       # 5-digit INSEE — confirmed by EDA
-    "Circonscription":                 "commune_name",
-    "Numéro de panneau":               "list_id",
-    "Libellé abrégé de liste":         "list_label_short",
-    "Libellé de la liste":             "list_label",
-    "Code nuance de liste":            "list_nuance",          # key into NUANCE_GROUP_MAP
-    "Nuance de liste":                 "list_nuance_label",
-    "Tête de liste":                   "is_list_leader",       # 'Oui'/'Non' — authoritative flag
-    "Ordre":                           "position_on_list",     # integer rank on list; 1 = leader
-    "Sexe":                            "gender",               # 'M' or 'F'
-    "Nom sur le bulletin de vote":     "family_name",
-    "Prénom sur le bulletin de vote":  "given_name",
-    "Nationalité":                     "nationality",
-    "Code personnalité":               "personality_code",
-    "CC":                              "candidate_category",   # semantics unknown; preserved for completeness
+    "Code département": "dep_code",
+    "Département": "dep_name",
+    "Code circonscription": "commune_insee",  # 5-digit INSEE — confirmed by EDA
+    "Circonscription": "commune_name",
+    "Numéro de panneau": "list_id",
+    "Libellé abrégé de liste": "list_label_short",
+    "Libellé de la liste": "list_label",
+    "Code nuance de liste": "list_nuance",  # key into NUANCE_GROUP_MAP
+    "Nuance de liste": "list_nuance_label",
+    "Tête de liste": "is_list_leader",  # 'Oui'/'Non' — authoritative flag
+    "Ordre": "position_on_list",  # integer rank on list; 1 = leader
+    "Sexe": "gender",  # 'M' or 'F'
+    "Nom sur le bulletin de vote": "family_name",
+    "Prénom sur le bulletin de vote": "given_name",
+    "Nationalité": "nationality",
+    "Code personnalité": "personality_code",
+    "CC": "candidate_category",  # semantics unknown; preserved for completeness
 }
 
 # Source: mun2026-maires-sortants-20260227.csv (3.9 MB) — mayors-only extract.
 # No function/role column exists because all rows are mayors (role is implicit).
 # No function filter is needed in dim_candidate.py.
 RNE_COLUMN_MAP: dict[str, str] = {
-    "Code du département":                              "dep_code",
-    "Libellé du département":                           "dep_name",
-    "Code de la collectivité à statut particulier":     "special_collectivity_code",
-    "Libellé de la collectivité à statut particulier":  "special_collectivity_name",
-    "Code de la commune":                               "commune_insee",   # join key for incumbent matching
-    "Libellé de la commune":                            "commune_name",
-    "Nom de l'élu":                                     "family_name",
-    "Prénom de l'élu":                                  "given_name",
-    "Code sexe":                                        "gender",
-    "Date de naissance":                                "birth_date",
-    "Code de la catégorie socio-professionnelle":       "socio_professional_code",
-    "Libellé de la catégorie socio-professionnelle":    "socio_professional_label",
-    "Date de début du mandat":                          "mandate_start_date",
-    "Date de début de la fonction":                     "function_start_date",
+    "Code du département": "dep_code",
+    "Libellé du département": "dep_name",
+    "Code de la collectivité à statut particulier": "special_collectivity_code",
+    "Libellé de la collectivité à statut particulier": "special_collectivity_name",
+    "Code de la commune": "commune_insee",  # join key for incumbent matching
+    "Libellé de la commune": "commune_name",
+    "Nom de l'élu": "family_name",
+    "Prénom de l'élu": "given_name",
+    "Code sexe": "gender",
+    "Date de naissance": "birth_date",
+    "Code de la catégorie socio-professionnelle": "socio_professional_code",
+    "Libellé de la catégorie socio-professionnelle": "socio_professional_label",
+    "Date de début du mandat": "mandate_start_date",
+    "Date de début de la fonction": "function_start_date",
 }

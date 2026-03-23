@@ -24,7 +24,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.config.settings import BRONZE_DIR, DATA_SOURCES, RAW_DIR
-from src.ingest._base import build_provenance_columns, compute_file_md5, download_raw_file
+from src.ingest._base import (
+    build_provenance_columns,
+    compute_file_md5,
+    download_raw_file,
+)
+from src.observability.run_logger import log_source_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +58,7 @@ def load_seats_to_bronze(
     raw_xlsx_path: Path,
     bronze_dir: Path = BRONZE_DIR,
     sheet_name: str | int = 0,
-) -> Path:
+) -> tuple[Path, int]:
     """Read the seats/population XLSX and write it as a bronze Parquet file.
 
     dtype=str is critical here: without it, commune codes like '01001' are
@@ -71,7 +76,7 @@ def load_seats_to_bronze(
         sheet_name: Sheet name or 0-based integer index. Default 0 (first sheet).
 
     Returns:
-        Path to the written bronze Parquet file.
+        Tuple of (path_to_bronze_parquet, row_count).
 
     Raises:
         FileNotFoundError: If raw_xlsx_path does not exist.
@@ -80,15 +85,13 @@ def load_seats_to_bronze(
     if not raw_xlsx_path.exists():
         raise FileNotFoundError(f"Raw seats XLSX not found: {raw_xlsx_path}")
 
-    logger.info(
-        "Reading seats XLSX path=%s sheet=%s", raw_xlsx_path.name, sheet_name
-    )
+    logger.info("Reading seats XLSX path=%s sheet=%s", raw_xlsx_path.name, sheet_name)
 
     try:
         seats_df = pd.read_excel(
             raw_xlsx_path,
             sheet_name=sheet_name,
-            dtype=str,        # Preserve commune codes with leading zeros
+            dtype=str,  # Preserve commune codes with leading zeros
             engine="openpyxl",
         )
     except Exception as exc:
@@ -97,13 +100,9 @@ def load_seats_to_bronze(
         ) from exc
 
     if seats_df.empty:
-        raise ValueError(
-            f"Seats XLSX sheet={sheet_name} is empty in {raw_xlsx_path}"
-        )
+        raise ValueError(f"Seats XLSX sheet={sheet_name} is empty in {raw_xlsx_path}")
 
-    logger.info(
-        "Loaded seats rows=%d columns=%d", len(seats_df), len(seats_df.columns)
-    )
+    logger.info("Loaded seats rows=%d columns=%d", len(seats_df), len(seats_df.columns))
     logger.info("Columns: %s", seats_df.columns.tolist())
 
     source_hash = compute_file_md5(raw_xlsx_path)
@@ -125,7 +124,7 @@ def load_seats_to_bronze(
         len(seats_df),
         bronze_path.stat().st_size / 1_048_576,
     )
-    return bronze_path
+    return bronze_path, len(seats_df)
 
 
 def ingest_seats_population(
@@ -143,8 +142,15 @@ def ingest_seats_population(
     Returns:
         Path to the bronze Parquet file.
     """
-    raw_path, _md5 = download_seats_population(raw_dir=raw_dir)
-    bronze_path = load_seats_to_bronze(
+    raw_path, source_hash = download_seats_population(raw_dir=raw_dir)
+    bronze_path, row_count = load_seats_to_bronze(
         raw_xlsx_path=raw_path, bronze_dir=bronze_dir, sheet_name=sheet_name
+    )
+    log_source_snapshot(
+        source_key=_SOURCE_KEY,
+        source_url=_SOURCE_CFG["url"],
+        source_hash=source_hash,
+        raw_file_path=raw_path,
+        row_count=row_count,
     )
     return bronze_path

@@ -1,9 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "election-gender-bias-d4w"
 version = "0.1.0"
 description = "Gender bias in French media coverage of the 2026 municipal elections — data engineering + NLP portfolio project"
 requires-python = ">=3.11"
 readme = "README.md"
+
+[project.scripts]
+run-sampling-pipeline = "src.cli.run_sampling_pipeline:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
 
 [tool.black]
 line-length = 88
@@ -33,3 +43,4 @@ known-first-party = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+pythonpath = ["."]

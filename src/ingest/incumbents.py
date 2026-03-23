@@ -22,7 +22,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.config.settings import BRONZE_DIR, DATA_SOURCES, RAW_DIR
-from src.ingest._base import build_provenance_columns, compute_file_md5, download_raw_file
+from src.ingest._base import (
+    build_provenance_columns,
+    compute_file_md5,
+    download_raw_file,
+)
+from src.observability.run_logger import log_source_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +55,7 @@ def download_rne_incumbents(raw_dir: Path = RAW_DIR) -> tuple[Path, str]:
 def load_incumbents_to_bronze(
     raw_csv_path: Path,
     bronze_dir: Path = BRONZE_DIR,
-) -> Path:
+) -> tuple[Path, int]:
     """Read the RNE mayors CSV and write it as a bronze Parquet file.
 
     The RNE file is 3.9 MB — small enough to load into memory without chunking.
@@ -61,7 +66,7 @@ def load_incumbents_to_bronze(
         bronze_dir: Root of the bronze data layer.
 
     Returns:
-        Path to the written bronze Parquet file.
+        Tuple of (path_to_bronze_parquet, row_count).
 
     Raises:
         FileNotFoundError: If raw_csv_path does not exist.
@@ -77,7 +82,7 @@ def load_incumbents_to_bronze(
             raw_csv_path,
             dtype=str,
             encoding="utf-8",
-            sep=";",        # French government CSVs use semicolons (confirmed by EDA).
+            sep=";",  # French government CSVs use semicolons (confirmed by EDA).
         )
     except UnicodeDecodeError:
         logger.warning(
@@ -119,7 +124,7 @@ def load_incumbents_to_bronze(
         len(incumbents_df),
         bronze_path.stat().st_size / 1_048_576,
     )
-    return bronze_path
+    return bronze_path, len(incumbents_df)
 
 
 def ingest_incumbents(
@@ -135,6 +140,15 @@ def ingest_incumbents(
     Returns:
         Path to the bronze Parquet file.
     """
-    raw_path, _md5 = download_rne_incumbents(raw_dir=raw_dir)
-    bronze_path = load_incumbents_to_bronze(raw_csv_path=raw_path, bronze_dir=bronze_dir)
+    raw_path, source_hash = download_rne_incumbents(raw_dir=raw_dir)
+    bronze_path, row_count = load_incumbents_to_bronze(
+        raw_csv_path=raw_path, bronze_dir=bronze_dir
+    )
+    log_source_snapshot(
+        source_key=_SOURCE_KEY,
+        source_url=_SOURCE_CFG["url"],
+        source_hash=source_hash,
+        raw_file_path=raw_path,
+        row_count=row_count,
+    )
     return bronze_path

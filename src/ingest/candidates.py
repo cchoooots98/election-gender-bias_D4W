@@ -1,6 +1,6 @@
 """Ingest the Interior Ministry Tour 1 and Tour 2 candidate lists to bronze Parquet.
 
-Bronze layer rule (CLAUDE.md §6): these modules are faithful copies of the
+Bronze layer rule: these modules are faithful copies of the
 source — no cleaning, no renaming, no filtering. Schema transformation
 happens in src/transform/dim_candidate.py (silver layer).
 
@@ -25,12 +25,93 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.config.settings import BRONZE_DIR, DATA_SOURCES, RAW_DIR
-from src.ingest._base import build_provenance_columns, download_raw_file
+from src.ingest._base import (
+    build_provenance_columns,
+    compute_file_md5,
+    download_raw_file,
+)
+from src.observability.run_logger import log_source_snapshot
 
 logger = logging.getLogger(__name__)
 
+# ── Source config ─────────────────────────────────────────────────────────────
+# Both tour configs are declared at module level so _read_candidates_csv does
+# not need to know about them — callers pass in the URL for provenance.
+
 _SOURCE_KEY = "candidates_tour1"
 _SOURCE_CFG = DATA_SOURCES[_SOURCE_KEY]
+
+_TOUR2_SOURCE_KEY = "candidates_tour2"
+_TOUR2_SOURCE_CFG = DATA_SOURCES[_TOUR2_SOURCE_KEY]
+
+
+# ── Shared CSV reader ─────────────────────────────────────────────────────────
+
+
+def _read_candidates_csv(raw_csv_path: Path) -> pd.DataFrame:
+    """Read a candidates CSV (Tour 1 or Tour 2) with encoding fallback.
+
+    Interior Ministry CSVs share an identical 17-column schema across both
+    rounds (confirmed by EDA). This private helper centralises the read
+    logic so Tour 1 and Tour 2 ingest functions do not duplicate it.
+
+    dtype=str on read: prevents commune codes like "01001" from being parsed
+    as integer 1001 and losing the leading zero — a common ingest bug.
+
+    Explicit sep=";": avoids csv.Sniffer which can corrupt accented characters
+    on Windows when sep=None is used with the C engine.
+
+    Encoding fallback: Interior Ministry CSVs are typically UTF-8; latin-1 is
+    tried when UTF-8 fails. The actual encoding is confirmed in
+    notebooks/02_source_schema_exploration.ipynb.
+
+    Args:
+        raw_csv_path: Path to the downloaded raw CSV.
+
+    Returns:
+        DataFrame with all source columns preserved as str dtype.
+
+    Raises:
+        FileNotFoundError: If raw_csv_path does not exist.
+        ValueError: If the CSV is empty after reading.
+    """
+    if not raw_csv_path.exists():
+        raise FileNotFoundError(f"Raw candidates CSV not found: {raw_csv_path}")
+
+    logger.info("Reading candidates CSV path=%s", raw_csv_path.name)
+
+    try:
+        candidates_df = pd.read_csv(
+            raw_csv_path,
+            dtype=str,  # Preserve leading zeros in commune codes
+            encoding="utf-8",
+            sep=";",
+        )
+    except UnicodeDecodeError:
+        logger.warning(
+            "utf-8 decode failed for %s — retrying with latin-1", raw_csv_path.name
+        )
+        candidates_df = pd.read_csv(
+            raw_csv_path,
+            dtype=str,
+            encoding="latin-1",
+            sep=";",
+        )
+
+    if candidates_df.empty:
+        raise ValueError(f"Candidates CSV is empty: {raw_csv_path}")
+
+    logger.info(
+        "Loaded candidates rows=%d columns=%d",
+        len(candidates_df),
+        len(candidates_df.columns),
+    )
+    logger.info("Columns: %s", candidates_df.columns.tolist())
+
+    return candidates_df
+
+
+# ── Tour 1 ────────────────────────────────────────────────────────────────────
 
 
 def download_candidates(raw_dir: Path = RAW_DIR) -> tuple[Path, str]:
@@ -53,65 +134,27 @@ def download_candidates(raw_dir: Path = RAW_DIR) -> tuple[Path, str]:
 def load_candidates_to_bronze(
     raw_csv_path: Path,
     bronze_dir: Path = BRONZE_DIR,
-) -> Path:
-    """Read the raw candidates CSV and write it as a bronze Parquet file.
+) -> tuple[Path, int]:
+    """Read the raw Tour 1 candidates CSV and write it as a bronze Parquet file.
 
     Adds provenance columns (_source_url, _ingested_at, _source_hash).
     All source columns are preserved as-is — bronze is an exact replica.
-
-    Encoding note: Interior Ministry CSVs are typically latin-1 (ISO-8859-1).
-    If the file fails to read with latin-1, utf-8 is tried as a fallback.
-    The actual encoding is confirmed in notebooks/02_source_schema_exploration.ipynb.
-
-    dtype=str on read: prevents commune codes like "01001" from being parsed
-    as integer 1001 and losing the leading zero — a common ingest bug.
 
     Args:
         raw_csv_path: Path to the downloaded raw CSV.
         bronze_dir: Root of the bronze data layer.
 
     Returns:
-        Path to the written bronze Parquet file.
+        Tuple of (path_to_bronze_parquet, row_count). row_count is used by
+        the caller to record the snapshot in meta.meta_source_snapshot.
 
     Raises:
         FileNotFoundError: If raw_csv_path does not exist.
         ValueError: If the CSV is empty after reading.
     """
-    if not raw_csv_path.exists():
-        raise FileNotFoundError(f"Raw candidates CSV not found: {raw_csv_path}")
-
-    logger.info("Reading candidates CSV path=%s", raw_csv_path.name)
-
-    try:
-        candidates_df = pd.read_csv(
-            raw_csv_path,
-            dtype=str,      # Preserve leading zeros in commune codes
-            encoding="utf-8",
-            sep=";",        # Interior Ministry CSVs use semicolons (confirmed by hex dump).
-                            # Explicit sep avoids csv.Sniffer path which can corrupt accented
-                            # characters on Windows when sep=None is used with the C engine.
-        )
-    except UnicodeDecodeError:
-        logger.warning(
-            "utf-8 decode failed for %s — retrying with latin-1", raw_csv_path.name
-        )
-        candidates_df = pd.read_csv(
-            raw_csv_path,
-            dtype=str,
-            encoding="latin-1",
-            sep=";",
-        )
-
-    if candidates_df.empty:
-        raise ValueError(f"Candidates CSV is empty: {raw_csv_path}")
-
-    logger.info(
-        "Loaded candidates rows=%d columns=%d", len(candidates_df), len(candidates_df.columns)
-    )
-    logger.info("Columns: %s", candidates_df.columns.tolist())
+    candidates_df = _read_candidates_csv(raw_csv_path)
 
     # Attach mandatory bronze provenance columns.
-    from src.ingest._base import compute_file_md5
     source_hash = compute_file_md5(raw_csv_path)
     provenance = build_provenance_columns(
         source_url=_SOURCE_CFG["url"], source_hash=source_hash
@@ -132,7 +175,7 @@ def load_candidates_to_bronze(
         len(candidates_df),
         bronze_path.stat().st_size / 1_048_576,
     )
-    return bronze_path
+    return bronze_path, len(candidates_df)
 
 
 def ingest_candidates(
@@ -150,15 +193,23 @@ def ingest_candidates(
     Returns:
         Path to the bronze Parquet file.
     """
-    raw_path, _md5 = download_candidates(raw_dir=raw_dir)
-    bronze_path = load_candidates_to_bronze(raw_csv_path=raw_path, bronze_dir=bronze_dir)
+    raw_path, source_hash = download_candidates(raw_dir=raw_dir)
+    bronze_path, row_count = load_candidates_to_bronze(
+        raw_csv_path=raw_path, bronze_dir=bronze_dir
+    )
+    # Record source snapshot for traceability — enables freshness checks and
+    # audit trail of which source version produced each bronze file.
+    log_source_snapshot(
+        source_key=_SOURCE_KEY,
+        source_url=_SOURCE_CFG["url"],
+        source_hash=source_hash,
+        raw_file_path=raw_path,
+        row_count=row_count,
+    )
     return bronze_path
 
 
 # ── Tour 2 ────────────────────────────────────────────────────────────────────
-
-_TOUR2_SOURCE_KEY = "candidates_tour2"
-_TOUR2_SOURCE_CFG = DATA_SOURCES[_TOUR2_SOURCE_KEY]
 
 
 def download_candidates_tour2(raw_dir: Path = RAW_DIR) -> tuple[Path, str]:
@@ -184,56 +235,25 @@ def download_candidates_tour2(raw_dir: Path = RAW_DIR) -> tuple[Path, str]:
 def load_candidates_tour2_to_bronze(
     raw_csv_path: Path,
     bronze_dir: Path = BRONZE_DIR,
-) -> Path:
+) -> tuple[Path, int]:
     """Read the Tour 2 candidates CSV and write it as a bronze Parquet file.
 
-    Same encoding-fallback and dtype=str strategy as Tour 1.
+    Same encoding-fallback and dtype=str strategy as Tour 1 — both rounds
+    share the identical 17-column schema (confirmed by EDA).
 
     Args:
         raw_csv_path: Path to the downloaded raw CSV.
         bronze_dir: Root of the bronze data layer.
 
     Returns:
-        Path to the written bronze Parquet file.
+        Tuple of (path_to_bronze_parquet, row_count).
 
     Raises:
         FileNotFoundError: If raw_csv_path does not exist.
         ValueError: If the CSV is empty after reading.
     """
-    if not raw_csv_path.exists():
-        raise FileNotFoundError(f"Raw Tour 2 candidates CSV not found: {raw_csv_path}")
+    tour2_df = _read_candidates_csv(raw_csv_path)
 
-    logger.info("Reading Tour 2 candidates CSV path=%s", raw_csv_path.name)
-
-    try:
-        tour2_df = pd.read_csv(
-            raw_csv_path,
-            dtype=str,
-            encoding="utf-8",
-            sep=";",        # Same format as Tour 1 — semicolon separator, confirmed.
-        )
-    except UnicodeDecodeError:
-        logger.warning(
-            "utf-8 decode failed for %s — retrying with latin-1", raw_csv_path.name
-        )
-        tour2_df = pd.read_csv(
-            raw_csv_path,
-            dtype=str,
-            encoding="latin-1",
-            sep=";",
-        )
-
-    if tour2_df.empty:
-        raise ValueError(f"Tour 2 candidates CSV is empty: {raw_csv_path}")
-
-    logger.info(
-        "Loaded Tour 2 candidates rows=%d columns=%d",
-        len(tour2_df),
-        len(tour2_df.columns),
-    )
-    logger.info("Columns: %s", tour2_df.columns.tolist())
-
-    from src.ingest._base import compute_file_md5
     source_hash = compute_file_md5(raw_csv_path)
     provenance = build_provenance_columns(
         source_url=_TOUR2_SOURCE_CFG["url"], source_hash=source_hash
@@ -253,7 +273,7 @@ def load_candidates_tour2_to_bronze(
         len(tour2_df),
         bronze_path.stat().st_size / 1_048_576,
     )
-    return bronze_path
+    return bronze_path, len(tour2_df)
 
 
 def ingest_candidates_tour2(
@@ -269,8 +289,15 @@ def ingest_candidates_tour2(
     Returns:
         Path to the bronze Parquet file.
     """
-    raw_path, _md5 = download_candidates_tour2(raw_dir=raw_dir)
-    bronze_path = load_candidates_tour2_to_bronze(
+    raw_path, source_hash = download_candidates_tour2(raw_dir=raw_dir)
+    bronze_path, row_count = load_candidates_tour2_to_bronze(
         raw_csv_path=raw_path, bronze_dir=bronze_dir
+    )
+    log_source_snapshot(
+        source_key=_TOUR2_SOURCE_KEY,
+        source_url=_TOUR2_SOURCE_CFG["url"],
+        source_hash=source_hash,
+        raw_file_path=raw_path,
+        row_count=row_count,
     )
     return bronze_path

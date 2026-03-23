@@ -101,7 +101,8 @@ def _validate_dim_commune(
 
     Quarantine strategy: bad rows are moved to rejected_df with a
     _rejection_reason column rather than silently dropped. This follows the
-    "quarantine, not delete" principle from CLAUDE.md §6.
+    "quarantine, not delete" principle: bad rows go to a rejected sub-table
+    with a _rejection_reason column rather than being silently dropped.
 
     Pipeline-level failure (DataQualityError) is raised only when the null
     rate on commune_insee exceeds DQ_MAX_NULL_RATE — meaning the entire
@@ -225,7 +226,9 @@ def build_dim_commune(
         DataQualityError: If null rate on commune_insee exceeds DQ_MAX_NULL_RATE.
     """
     effective_cog_map = cog_column_map if cog_column_map is not None else COG_COLUMN_MAP
-    effective_seats_map = seats_column_map if seats_column_map is not None else SEATS_COLUMN_MAP
+    effective_seats_map = (
+        seats_column_map if seats_column_map is not None else SEATS_COLUMN_MAP
+    )
 
     # ── Load bronze sources ───────────────────────────────────────────────────
     cog_bronze_path = bronze_dir / "geography" / "cog_communes.parquet"
@@ -234,16 +237,13 @@ def build_dim_commune(
     for path in (cog_bronze_path, seats_bronze_path):
         if not path.exists():
             raise FileNotFoundError(
-                f"Bronze Parquet not found: {path}. "
-                "Run the ingest step first."
+                f"Bronze Parquet not found: {path}. " "Run the ingest step first."
             )
 
     cog_df = pd.read_parquet(cog_bronze_path)
     seats_df = pd.read_parquet(seats_bronze_path)
 
-    logger.info(
-        "Loaded bronze: cog_rows=%d seats_rows=%d", len(cog_df), len(seats_df)
-    )
+    logger.info("Loaded bronze: cog_rows=%d seats_rows=%d", len(cog_df), len(seats_df))
 
     # ── Rename COG columns to canonical names ─────────────────────────────────
     if effective_cog_map:
@@ -282,25 +282,32 @@ def build_dim_commune(
         )
 
     # ── Left join COG + seats on commune_insee ────────────────────────────────
-    # commune_insee must exist in COG after rename; seats may not have a
-    # 'commune_insee' column until EDA confirms the correct source column name.
-    seats_join_key = "commune_insee" if "commune_insee" in seats_df.columns else None
+    # commune_insee must exist in COG after rename; if it is absent from seats
+    # after applying SEATS_COLUMN_MAP the mapping is wrong and we must fail
+    # fast — proceeding would set every commune to city_size_bucket='excluded',
+    # silently breaking the entire sampling and regression pipeline downstream.
+    # Fail fast: proceeding without this column silently breaks all downstream analysis.
+    if "commune_insee" not in seats_df.columns:
+        raise DataQualityError(
+            "seats join failed: 'commune_insee' not present in seats after applying "
+            "SEATS_COLUMN_MAP. Verify CODE_COMMUNE mapping in settings.py matches "
+            "the actual column name in seats_population.xlsx."
+        )
 
-    if seats_join_key:
-        commune_df = cog_df.merge(
-            seats_df[[col for col in seats_df.columns if not col.startswith("_")]],
-            on="commune_insee",
-            how="left",
-        )
-        logger.info(
-            "Joined COG + seats: result_rows=%d", len(commune_df)
-        )
-    else:
-        logger.warning(
-            "Cannot join seats — 'commune_insee' not in seats columns after rename. "
-            "Proceeding with COG only; population will be null."
-        )
-        commune_df = cog_df.copy()
+    # Only pull the columns from seats that dim_commune actually needs.
+    # COG is the authoritative source for commune_name and dep_code; including
+    # those from seats would produce _x/_y suffix columns in the merge output,
+    # which the _OUTPUT_COLUMNS guard at line ~324 would then fill with None.
+    # Explicit column whitelist: prevents _x/_y suffix collisions in the merge output.
+    _SEATS_MERGE_COLS = {"commune_insee", "population", "seats_municipal", "seats_epci"}
+    seats_select = [c for c in seats_df.columns if c in _SEATS_MERGE_COLS]
+
+    commune_df = cog_df.merge(
+        seats_df[seats_select],
+        on="commune_insee",
+        how="left",
+    )
+    logger.info("Joined COG + seats: result_rows=%d", len(commune_df))
 
     # ── Assign city_size_bucket ───────────────────────────────────────────────
     if "population" in commune_df.columns:
@@ -356,12 +363,13 @@ def build_dim_commune(
     try:
         conn.execute("CREATE SCHEMA IF NOT EXISTS silver")
         conn.execute("DROP TABLE IF EXISTS silver.dim_commune")
-        conn.execute(
-            "CREATE TABLE silver.dim_commune AS SELECT * FROM clean_df"
-        )
-        row_count = conn.execute(
+        conn.execute("CREATE TABLE silver.dim_commune AS SELECT * FROM clean_df")
+        row_count_result = conn.execute(
             "SELECT count(*) FROM silver.dim_commune"
-        ).fetchone()[0]
+        ).fetchone()
+        if row_count_result is None:
+            raise RuntimeError("Expected one row from silver.dim_commune count query")
+        row_count = row_count_result[0]
         logger.info("DuckDB silver.dim_commune written rows=%d", row_count)
     finally:
         conn.close()

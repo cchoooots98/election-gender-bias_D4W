@@ -24,7 +24,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from src.config.settings import BRONZE_DIR, DATA_SOURCES, RAW_DIR
-from src.ingest._base import build_provenance_columns, compute_file_md5, download_raw_file
+from src.ingest._base import (
+    build_provenance_columns,
+    compute_file_md5,
+    download_raw_file,
+)
+from src.observability.run_logger import log_source_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +57,11 @@ def download_cog_communes(raw_dir: Path = RAW_DIR) -> tuple[Path, str]:
 def load_cog_to_bronze(
     raw_csv_path: Path,
     bronze_dir: Path = BRONZE_DIR,
-) -> Path:
+) -> tuple[Path, int]:
     """Read the COG commune CSV and write it as a bronze Parquet file.
 
-    INSEE COG files use UTF-8 encoding and semicolon separators.
-    dtype=str is used to preserve leading zeros in COM/DEP/REG codes
+    INSEE COG v_commune_2026.csv uses UTF-8 encoding and comma separators.
+    dtype=str preserves leading zeros in COM/DEP/REG codes
     (e.g. DEP '01' would be parsed as integer 1 without this).
 
     Args:
@@ -64,7 +69,7 @@ def load_cog_to_bronze(
         bronze_dir: Root of the bronze data layer.
 
     Returns:
-        Path to the written bronze Parquet file.
+        Tuple of (path_to_bronze_parquet, row_count).
 
     Raises:
         FileNotFoundError: If raw_csv_path does not exist.
@@ -75,15 +80,16 @@ def load_cog_to_bronze(
 
     logger.info("Reading COG communes CSV path=%s", raw_csv_path.name)
 
-    # INSEE COG files use UTF-8 and semicolons (confirmed by EDA).
-    # Explicit sep=';' avoids the csv.Sniffer path (triggered by sep=None) which can
+    # INSEE COG v_commune_2026.csv uses UTF-8 and commas as the field separator.
+    # dtype=str preserves leading zeros in COM/DEP/REG codes (e.g. DEP '01' must
+    # not become integer 1). Explicit sep=',' avoids csv.Sniffer, which can
     # corrupt accented characters on Windows when used with the C engine.
     try:
         cog_df = pd.read_csv(
             raw_csv_path,
             dtype=str,
             encoding="utf-8",
-            sep=";",
+            sep=",",
         )
     except UnicodeDecodeError:
         logger.warning(
@@ -93,7 +99,7 @@ def load_cog_to_bronze(
             raw_csv_path,
             dtype=str,
             encoding="latin-1",
-            sep=";",
+            sep=",",
         )
 
     if cog_df.empty:
@@ -103,9 +109,13 @@ def load_cog_to_bronze(
         "Loaded COG rows=%d columns=%d typecom_values=%s",
         len(cog_df),
         len(cog_df.columns),
-        cog_df.get("TYPECOM", cog_df.get("typecom", pd.Series(dtype=str))).unique().tolist()
-        if any(c.upper() == "TYPECOM" for c in cog_df.columns)
-        else "column_name_unknown_until_EDA",
+        (
+            cog_df.get("TYPECOM", cog_df.get("typecom", pd.Series(dtype=str)))
+            .unique()
+            .tolist()
+            if any(c.upper() == "TYPECOM" for c in cog_df.columns)
+            else "column_name_unknown_until_EDA"
+        ),
     )
     logger.info("Columns: %s", cog_df.columns.tolist())
 
@@ -128,7 +138,7 @@ def load_cog_to_bronze(
         len(cog_df),
         bronze_path.stat().st_size / 1_048_576,
     )
-    return bronze_path
+    return bronze_path, len(cog_df)
 
 
 def ingest_geography(
@@ -144,6 +154,15 @@ def ingest_geography(
     Returns:
         Path to the bronze Parquet file.
     """
-    raw_path, _md5 = download_cog_communes(raw_dir=raw_dir)
-    bronze_path = load_cog_to_bronze(raw_csv_path=raw_path, bronze_dir=bronze_dir)
+    raw_path, source_hash = download_cog_communes(raw_dir=raw_dir)
+    bronze_path, row_count = load_cog_to_bronze(
+        raw_csv_path=raw_path, bronze_dir=bronze_dir
+    )
+    log_source_snapshot(
+        source_key=_SOURCE_KEY,
+        source_url=_SOURCE_CFG["url"],
+        source_hash=source_hash,
+        raw_file_path=raw_path,
+        row_count=row_count,
+    )
     return bronze_path

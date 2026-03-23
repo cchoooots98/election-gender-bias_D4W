@@ -4,7 +4,7 @@ This private module (underscore prefix = not public API) centralises the three
 operations that every ingest function needs:
   1. Download a file from HTTP with retry-safe semantics and skip-if-unchanged.
   2. Compute an MD5 hash of a local file (streaming, safe for large files).
-  3. Build the three bronze provenance columns that CLAUDE.md §6 mandates.
+  3. Build the three bronze provenance columns required by every bronze Parquet file.
 
 Industry pattern: a shared "_base" or "_utils" module for cross-cutting concerns
 prevents copy-paste across ingest modules and ensures provenance columns are
@@ -133,7 +133,7 @@ def build_provenance_columns(
 ) -> dict[str, str]:
     """Return the three bronze provenance columns as a dict.
 
-    CLAUDE.md §6 mandates that every bronze row carries:
+    Every bronze row carries three provenance columns:
       _source_url   — the URL the data was downloaded from
       _ingested_at  — UTC timestamp of the ingestion run
       _source_hash  — MD5 of the raw source file

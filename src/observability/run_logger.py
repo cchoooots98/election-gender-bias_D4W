@@ -1,11 +1,11 @@
 """Pipeline run observability: record data source snapshots and run metadata.
 
-This module writes two meta tables to DuckDB after each pipeline step:
+This module writes two meta tables to DuckDB:
   meta.meta_source_snapshot — one row per source file downloaded, recording
       URL, MD5 hash, row count, and timestamp. Enables change detection:
       if source_hash changes between runs, the source file was updated.
-  meta.meta_run — (stub for future use) one row per pipeline run with
-      start/end time, status, and error counts.
+  meta.meta_run — one row per sampling-pipeline run with start/end time,
+      status, row counts, and artifact paths.
 
 Why observability matters for a portfolio project:
   A hiring manager reviewing this repo will check whether the pipeline can
@@ -20,6 +20,7 @@ Atlan provide as managed services. We implement a minimal version ourselves.
 """
 
 import hashlib
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +47,19 @@ CREATE TABLE IF NOT EXISTS meta.meta_source_snapshot (
     raw_file_path    VARCHAR     NOT NULL,
     row_count        INTEGER     NOT NULL,
     fetched_at       TIMESTAMPTZ NOT NULL
+)
+"""
+
+_CREATE_RUN_TABLE = """
+CREATE TABLE IF NOT EXISTS meta.meta_run (
+    run_id         VARCHAR     PRIMARY KEY,
+    flow_name      VARCHAR     NOT NULL,
+    start_ts       TIMESTAMPTZ NOT NULL,
+    end_ts         TIMESTAMPTZ NOT NULL,
+    status         VARCHAR     NOT NULL,
+    rows_ingested  INTEGER     NOT NULL,
+    error_count    INTEGER     NOT NULL,
+    artifact_paths VARCHAR     NOT NULL
 )
 """
 
@@ -77,6 +91,7 @@ def _ensure_meta_tables(conn: duckdb.DuckDBPyConnection) -> None:
     """
     conn.execute(_CREATE_META_SCHEMA)
     conn.execute(_CREATE_SOURCE_SNAPSHOT_TABLE)
+    conn.execute(_CREATE_RUN_TABLE)
 
 
 def log_source_snapshot(
@@ -153,7 +168,7 @@ def log_source_snapshot(
             "Source snapshot recorded source_key=%s rows=%d hash=%s snapshot_id=%s",
             source_key,
             row_count,
-            source_hash[:8] + "…",   # Log first 8 chars — enough for change detection
+            source_hash[:8] + "…",  # Log first 8 chars — enough for change detection
             snapshot_id[:8] + "…",
         )
 
@@ -198,3 +213,77 @@ def get_last_source_hash(
         return result[0] if result else None
     finally:
         conn.close()
+
+
+def log_pipeline_run(
+    run_id: str,
+    flow_name: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    status: str,
+    rows_ingested: int,
+    error_count: int,
+    artifact_paths: list[str | Path],
+    duckdb_path: Path = WAREHOUSE_PATH,
+) -> str:
+    """Record one pipeline run to meta.meta_run.
+
+    The current project only implements the official-data sampling slice, so
+    this table tracks that runnable subset end-to-end. The row is overwritten
+    when the same run_id is logged again, making the helper idempotent for
+    retried finalisation logic.
+
+    Args:
+        run_id: Unique identifier for this pipeline run.
+        flow_name: Logical pipeline name (for example "sampling_pipeline").
+        start_ts: UTC timestamp when the run started.
+        end_ts: UTC timestamp when the run finished.
+        status: Final run state ("success", "partial", or "failed").
+        rows_ingested: Total rows materialized by this runnable slice.
+        error_count: Count of non-successful steps in this run.
+        artifact_paths: Ordered list of output artifact paths.
+        duckdb_path: Path to the DuckDB warehouse file.
+
+    Returns:
+        The run_id that was written.
+    """
+    artifact_paths_json = json.dumps(
+        [str(path) for path in artifact_paths],
+        ensure_ascii=False,
+    )
+
+    duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = duckdb.connect(str(duckdb_path))
+    try:
+        _ensure_meta_tables(conn)
+        conn.execute("DELETE FROM meta.meta_run WHERE run_id = ?", [run_id])
+        conn.execute(
+            """
+            INSERT INTO meta.meta_run
+                (run_id, flow_name, start_ts, end_ts, status,
+                 rows_ingested, error_count, artifact_paths)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                run_id,
+                flow_name,
+                start_ts,
+                end_ts,
+                status,
+                rows_ingested,
+                error_count,
+                artifact_paths_json,
+            ],
+        )
+        logger.info(
+            "Pipeline run recorded run_id=%s flow=%s status=%s rows=%d errors=%d",
+            run_id,
+            flow_name,
+            status,
+            rows_ingested,
+            error_count,
+        )
+    finally:
+        conn.close()
+
+    return run_id

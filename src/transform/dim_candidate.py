@@ -58,7 +58,6 @@ from rapidfuzz import fuzz
 from src.config.settings import (
     BRONZE_DIR,
     CANDIDATES_COLUMN_MAP,
-    CITY_SIZE_SMALL_THRESHOLD,
     DQ_MAX_NULL_RATE,
     INCUMBENT_MATCH_THRESHOLD,
     NUANCE_GROUP_MAP,
@@ -75,11 +74,18 @@ _OUTPUT_COLUMNS = [
     "full_name",
     "gender",
     "commune_insee",
-    "commune_name",
-    "dep_code",
+    # reg_code and city_size_bucket are denormalised from dim_commune because
+    # they are direct regression inputs; the join overhead on every model run
+    # is not justified for a static, small table (data-model.md §Design Rationale).
+    # commune_name, dep_code, and population are intentionally excluded —
+    # they are fully derivable via JOIN dim_commune and play no direct role
+    # in the regression or sampling logic. (data-model.md §dim_candidate_leader)
     "reg_code",
-    "population",
     "city_size_bucket",
+    # same_name_candidate_count is derived from the full Tour 1 candidate pool.
+    # It quantifies exact normalized-name collisions and helps the sampling
+    # step prefer candidates with lower ambiguity in downstream news matching.
+    "same_name_candidate_count",
     "list_nuance",
     "nuance_group",
     "is_incumbent",
@@ -96,11 +102,20 @@ def _normalize_name(name: str) -> str:
     """Normalise a French name for fuzzy comparison.
 
     Steps:
-    1. Strip whitespace
-    2. Uppercase
+    1. Strip whitespace and uppercase
+    2. Unify hyphens and apostrophes → space (French name variants: Jean-Luc = Jean Luc)
     3. Decompose accented characters (NFD normalisation)
     4. Remove non-ASCII combining marks (strips accents like é → e)
     5. Collapse multiple spaces
+
+    Why step 2 matters: token_sort_ratio sorts tokens alphabetically before
+    comparing. "ANNE-SOPHIE MARTIN" has tokens ["ANNE-SOPHIE","MARTIN"], which
+    sort to "ANNE-SOPHIE MARTIN". "ANNE SOPHIE MARTIN" has tokens
+    ["ANNE","SOPHIE","MARTIN"], which sort to "ANNE MARTIN SOPHIE". These two
+    sorted strings are substantially different (score ≈ 61), falling below the
+    INCUMBENT_MATCH_THRESHOLD of 85. After replacing the hyphen with a space,
+    both tokenise identically and score 100. The same issue breaks exact-match
+    lookups in the advanced_to_tour2 set.
 
     Why all steps: the candidate file and the RNE file may use different accent
     encodings (latin-1 vs UTF-8) or different capitalisation conventions.
@@ -115,10 +130,13 @@ def _normalize_name(name: str) -> str:
     if not name or not isinstance(name, str):
         return ""
     name = name.strip().upper()
+    # Unify hyphens and apostrophe variants — common in French given names.
+    # Jean-Luc and Jean Luc, O'Brien and O Brien all map to the same tokens.
+    name = name.replace("-", " ").replace("'", " ").replace("\u2019", " ")
     # NFD decomposes accented chars into base char + combining mark.
     # encode('ascii', 'ignore') then strips the combining marks.
     name = unicodedata.normalize("NFD", name).encode("ascii", "ignore").decode("ascii")
-    # Collapse multiple spaces (e.g. after removing hyphen-related chars)
+    # Collapse multiple spaces produced by punctuation removal above.
     name = " ".join(name.split())
     return name
 
@@ -141,6 +159,77 @@ def _generate_leader_id(full_name: str, commune_insee: str) -> str:
     """
     raw = f"{full_name}|{commune_insee}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _build_full_name_columns(candidate_df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure full_name and full_name_normalized exist on a candidate DataFrame.
+
+    The Tour 1 candidate file is the authoritative source for both list leaders
+    and the broader candidate pool. Centralising full-name construction here
+    avoids subtle drift between incumbent matching, Tour 2 matching, and the
+    same-name collision feature used by the sampling step.
+
+    Args:
+        candidate_df: Candidate DataFrame after the source column map is applied.
+
+    Returns:
+        Copy of candidate_df with full_name and full_name_normalized columns.
+    """
+    result_df = candidate_df.copy()
+
+    if "full_name" not in result_df.columns:
+        if "family_name" in result_df.columns and "given_name" in result_df.columns:
+            result_df["full_name"] = (
+                result_df["family_name"].fillna("")
+                + " "
+                + result_df["given_name"].fillna("")
+            ).str.strip()
+        else:
+            logger.warning(
+                "full_name column not found — name-based features will degrade. "
+                "Update CANDIDATES_COLUMN_MAP."
+            )
+            result_df["full_name"] = ""
+
+    result_df["full_name_normalized"] = result_df["full_name"].apply(_normalize_name)
+    return result_df
+
+
+def _compute_same_name_candidate_counts(candidate_df: pd.DataFrame) -> pd.DataFrame:
+    """Add exact normalized-name collision counts from the full Tour 1 pool.
+
+    This feature is intentionally computed before filtering to list leaders.
+    The question is not "how many leaders share this name?" but "how ambiguous
+    is this person's name in the broader candidate universe we may later search
+    for in news coverage?" Lower counts imply lower entity-resolution risk.
+
+    Args:
+        candidate_df: Tour 1 candidate DataFrame after column rename.
+
+    Returns:
+        Copy of candidate_df with same_name_candidate_count added.
+    """
+    result_df = _build_full_name_columns(candidate_df)
+    non_empty_name_mask = result_df["full_name_normalized"] != ""
+
+    collision_counts = result_df.loc[
+        non_empty_name_mask, "full_name_normalized"
+    ].value_counts()
+    result_df["same_name_candidate_count"] = result_df["full_name_normalized"].map(
+        collision_counts
+    )
+    result_df.loc[~non_empty_name_mask, "same_name_candidate_count"] = None
+    result_df["same_name_candidate_count"] = result_df[
+        "same_name_candidate_count"
+    ].astype("Int64")
+
+    max_collision = int(collision_counts.max()) if not collision_counts.empty else 0
+    logger.info(
+        "Computed same_name_candidate_count unique_names=%d max_collision=%d",
+        len(collision_counts),
+        max_collision,
+    )
+    return result_df
 
 
 def _build_tour2_leader_set(
@@ -179,7 +268,11 @@ def _build_tour2_leader_set(
         )
         return set()
 
-    effective_map = candidates_column_map if candidates_column_map is not None else CANDIDATES_COLUMN_MAP
+    effective_map = (
+        candidates_column_map
+        if candidates_column_map is not None
+        else CANDIDATES_COLUMN_MAP
+    )
 
     tour2_df = pd.read_parquet(tour2_bronze_path)
     logger.info("Loaded Tour 2 bronze rows=%d", len(tour2_df))
@@ -226,9 +319,13 @@ def _build_tour2_leader_set(
 
     # Build full name from parts (same logic as Tour 1).
     if "full_name" not in tour2_leaders_df.columns:
-        if "family_name" in tour2_leaders_df.columns and "given_name" in tour2_leaders_df.columns:
+        if (
+            "family_name" in tour2_leaders_df.columns
+            and "given_name" in tour2_leaders_df.columns
+        ):
             tour2_leaders_df["full_name"] = (
-                tour2_leaders_df["family_name"].fillna("") + " "
+                tour2_leaders_df["family_name"].fillna("")
+                + " "
                 + tour2_leaders_df["given_name"].fillna("")
             ).str.strip()
         else:
@@ -243,9 +340,7 @@ def _build_tour2_leader_set(
         if commune and name_norm:
             tour2_set.add((commune, name_norm))
 
-    logger.info(
-        "Tour 2 leader lookup built: %d (commune, name) pairs", len(tour2_set)
-    )
+    logger.info("Tour 2 leader lookup built: %d (commune, name) pairs", len(tour2_set))
     return tour2_set
 
 
@@ -340,7 +435,12 @@ def _build_incumbent_lookup(
             "Incumbent matching will return no matches until RNE_COLUMN_MAP is set."
         )
         return pd.DataFrame(
-            columns=["commune_insee", "full_name_normalized", "original_full_name", "rne_mandate_role"]
+            columns=[
+                "commune_insee",
+                "full_name_normalized",
+                "original_full_name",
+                "rne_mandate_role",
+            ]
         )
 
     rne_df["full_name_normalized"] = rne_df["original_full_name"].apply(_normalize_name)
@@ -349,7 +449,12 @@ def _build_incumbent_lookup(
     rne_df["rne_mandate_role"] = rne_df[mandate_col] if mandate_col else "unknown"
 
     lookup_df = rne_df[
-        ["commune_insee", "full_name_normalized", "original_full_name", "rne_mandate_role"]
+        [
+            "commune_insee",
+            "full_name_normalized",
+            "original_full_name",
+            "rne_mandate_role",
+        ]
     ].copy()
 
     logger.info(
@@ -448,7 +553,9 @@ def _apply_incumbent_matching(
 
     logger.info("Incumbent matching complete: %d/%d rows processed", total, total)
 
-    is_inc, scores, auditables = zip(*results) if results else ([], [], [])
+    is_inc, scores, auditables = (
+        zip(*results, strict=False) if results else ([], [], [])
+    )
     result_df = leader_df.copy()
     result_df["is_incumbent"] = list(is_inc)
     result_df["incumbent_match_score"] = list(scores)
@@ -557,12 +664,13 @@ def build_dim_candidate_leader(
       1. Load Tour 1 bronze candidates → filter to tête de liste (position == 1)
       2. Filter communes ≥ CITY_SIZE_SMALL_THRESHOLD
       3. Join dim_commune (silver) → city_size_bucket, reg_code, population
-      4. Assign nuance_group from NUANCE_GROUP_MAP
-      5. Build incumbent lookup → fuzzy-match against RNE
-      6. Derive advanced_to_tour2 flag from Tour 2 bronze (if available)
-      7. Generate leader_id (MD5)
-      8. DQ validation + quarantine
-      9. Idempotent write to Parquet + DuckDB
+      4. Compute same_name_candidate_count from all Tour 1 candidates
+      5. Assign nuance_group from NUANCE_GROUP_MAP
+      6. Build incumbent lookup → fuzzy-match against RNE
+      7. Derive advanced_to_tour2 flag from Tour 2 bronze (if available)
+      8. Generate leader_id (MD5)
+      9. DQ validation + quarantine
+      10. Idempotent write to Parquet + DuckDB
 
     Position-on-list filter: the candidates file contains one row per
     candidate, ordered by their position on the list. Position 1 = tête de
@@ -587,7 +695,9 @@ def build_dim_candidate_leader(
         DataQualityError: If null rate on gender exceeds DQ_MAX_NULL_RATE.
     """
     effective_cand_map = (
-        candidates_column_map if candidates_column_map is not None else CANDIDATES_COLUMN_MAP
+        candidates_column_map
+        if candidates_column_map is not None
+        else CANDIDATES_COLUMN_MAP
     )
 
     # ── Load bronze candidates ────────────────────────────────────────────────
@@ -605,9 +715,7 @@ def build_dim_candidate_leader(
     candidates_df = pd.read_parquet(cand_bronze_path)
     dim_commune_df = pd.read_parquet(dim_commune_path)
 
-    logger.info(
-        "Loaded bronze candidates rows=%d", len(candidates_df)
-    )
+    logger.info("Loaded bronze candidates rows=%d", len(candidates_df))
 
     # ── Apply column map ──────────────────────────────────────────────────────
     if effective_cand_map:
@@ -618,6 +726,8 @@ def build_dim_candidate_leader(
             "CANDIDATES_COLUMN_MAP is empty. Column names not confirmed by EDA. "
             "Filter and join steps may fail. Run notebooks/02_source_schema_exploration.ipynb."
         )
+
+    candidates_df = _compute_same_name_candidate_counts(candidates_df)
 
     # ── Filter to tête de liste ───────────────────────────────────────────────
     # Primary: use the explicit 'Tête de liste' flag ('Oui'/'Non') from the
@@ -659,34 +769,48 @@ def build_dim_candidate_leader(
             "Check CANDIDATES_COLUMN_MAP in settings.py."
         )
 
-    # ── Join dim_commune to get city_size_bucket, reg_code, population ────────
-    if "commune_insee" in leader_df.columns and "commune_insee" in dim_commune_df.columns:
-        commune_cols = ["commune_insee", "commune_name", "dep_code", "reg_code",
-                        "population", "city_size_bucket"]
-        available_commune_cols = [c for c in commune_cols if c in dim_commune_df.columns]
-        leader_df = leader_df.merge(
-            dim_commune_df[available_commune_cols],
-            on="commune_insee",
-            how="left",
+    # ── Join dim_commune to get city_size_bucket and reg_code ────────────────
+    # city_size_bucket is the stratification variable for matched sampling.
+    # reg_code is a regional fixed effect in the regression model.
+    # Both are required — missing either silently breaks the analysis.
+    # Fail fast: city_size_bucket and reg_code are required for sampling and regression.
+    if (
+        "commune_insee" not in leader_df.columns
+        or "commune_insee" not in dim_commune_df.columns
+    ):
+        raise DataQualityError(
+            "dim_commune join failed: 'commune_insee' not present in candidates or "
+            "dim_commune. city_size_bucket and reg_code are required for sampling "
+            "and regression. Check CANDIDATES_COLUMN_MAP in settings.py."
         )
-        logger.info("Joined dim_commune: result_rows=%d", len(leader_df))
 
-        # Filter out excluded communes (population < CITY_SIZE_SMALL_THRESHOLD).
-        if "city_size_bucket" in leader_df.columns:
-            before = len(leader_df)
-            leader_df = leader_df[
-                leader_df["city_size_bucket"] != "excluded"
-            ].copy()
-            logger.info(
-                "Filtered excluded communes: before=%d after=%d (excluded %d)",
-                before,
-                len(leader_df),
-                before - len(leader_df),
-            )
-    else:
-        logger.warning(
-            "commune_insee not found in candidates or dim_commune — skipping join. "
-            "Check CANDIDATES_COLUMN_MAP."
+    # Only denormalise the two columns that are direct regression/sampling inputs.
+    # commune_name, dep_code, population are excluded per data-model.md —
+    # they are derivable via JOIN dim_commune and must not be in this table.
+    # Selecting only these columns prevents _x/_y suffix collisions: leader_df
+    # already has commune_name/dep_code from the bronze candidates rename.
+    # Explicit column selection prevents _x/_y suffix collisions with leader_df.
+    commune_join_cols = ["commune_insee", "reg_code", "city_size_bucket"]
+    available_commune_cols = [
+        c for c in commune_join_cols if c in dim_commune_df.columns
+    ]
+    leader_df = leader_df.merge(
+        dim_commune_df[available_commune_cols],
+        on="commune_insee",
+        how="left",
+        validate="many_to_one",
+    )
+    logger.info("Joined dim_commune: result_rows=%d", len(leader_df))
+
+    # Filter out excluded communes (population < CITY_SIZE_SMALL_THRESHOLD).
+    if "city_size_bucket" in leader_df.columns:
+        before = len(leader_df)
+        leader_df = leader_df[leader_df["city_size_bucket"] != "excluded"].copy()
+        logger.info(
+            "Filtered excluded communes: before=%d after=%d (excluded %d)",
+            before,
+            len(leader_df),
+            before - len(leader_df),
         )
 
     # ── Assign nuance_group ───────────────────────────────────────────────────
@@ -713,7 +837,9 @@ def build_dim_candidate_leader(
         # Build full_name from parts if present; otherwise use placeholder.
         if "family_name" in leader_df.columns and "given_name" in leader_df.columns:
             leader_df["full_name"] = (
-                leader_df["family_name"].fillna("") + " " + leader_df["given_name"].fillna("")
+                leader_df["family_name"].fillna("")
+                + " "
+                + leader_df["given_name"].fillna("")
             ).str.strip()
         else:
             logger.warning(
@@ -723,6 +849,7 @@ def build_dim_candidate_leader(
             leader_df["full_name"] = ""
 
     leader_df["full_name_normalized"] = leader_df["full_name"].apply(_normalize_name)
+    leader_df = _build_full_name_columns(leader_df)
 
     # ── Incumbent matching ────────────────────────────────────────────────────
     incumbent_lookup_df = _build_incumbent_lookup(
@@ -766,20 +893,20 @@ def build_dim_candidate_leader(
     # ── Write silver Parquet ──────────────────────────────────────────────────
     silver_path = silver_dir / "dim_candidate_leader.parquet"
     silver_path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.Table.from_pandas(clean_df), silver_path, compression="snappy"
-    )
-    logger.info(
-        "Silver Parquet written path=%s rows=%d", silver_path, len(clean_df)
-    )
+    pq.write_table(pa.Table.from_pandas(clean_df), silver_path, compression="snappy")
+    logger.info("Silver Parquet written path=%s rows=%d", silver_path, len(clean_df))
 
     if not rejected_df.empty:
-        rejected_path = silver_dir / "_rejected" / "dim_candidate_leader_rejected.parquet"
+        rejected_path = (
+            silver_dir / "_rejected" / "dim_candidate_leader_rejected.parquet"
+        )
         rejected_path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(
             pa.Table.from_pandas(rejected_df), rejected_path, compression="snappy"
         )
-        logger.warning("Quarantine written path=%s rows=%d", rejected_path, len(rejected_df))
+        logger.warning(
+            "Quarantine written path=%s rows=%d", rejected_path, len(rejected_df)
+        )
 
     # ── Idempotent DuckDB write ────────────────────────────────────────────────
     duckdb_path.parent.mkdir(parents=True, exist_ok=True)
@@ -790,9 +917,14 @@ def build_dim_candidate_leader(
         conn.execute(
             "CREATE TABLE silver.dim_candidate_leader AS SELECT * FROM clean_df"
         )
-        row_count = conn.execute(
+        row_count_result = conn.execute(
             "SELECT count(*) FROM silver.dim_candidate_leader"
-        ).fetchone()[0]
+        ).fetchone()
+        if row_count_result is None:
+            raise RuntimeError(
+                "Expected one row from silver.dim_candidate_leader count query"
+            )
+        row_count = row_count_result[0]
         logger.info("DuckDB silver.dim_candidate_leader written rows=%d", row_count)
 
         # Log gender split — key sanity check before sampling.
