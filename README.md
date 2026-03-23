@@ -67,7 +67,141 @@ The analysis is organised around three layers:
 
 ## Status
 
-> **Early stage.** The project is currently in the planning and data exploration phase. Implementation details — tooling, pipeline architecture, and modelling choices — are being finalised.
+> **In progress.** Bronze ingest layer and Silver dimension tables are implemented. NLP pipeline and Gold mart tables are forthcoming.
+
+---
+
+## Pipeline Architecture
+
+This project uses the **medallion architecture** (Bronze → Silver → Gold),
+the standard pattern in modern data engineering (Databricks, dbt, Snowflake).
+
+| Layer | Purpose | Key Tables |
+|---|---|---|
+| **Bronze** | Faithful raw copies, append-only | `gdelt_results`, `candidates_tour1/2`, `cog_communes`, `seats_population`, `rne_incumbents` |
+| **Silver** | Cleaned, validated, analysis-ready | `dim_commune`, `dim_candidate_leader`, `fact_article`, `fact_mention`, `fact_stereotype_word_counts` |
+| **Gold** | Aggregated metrics for dashboard | `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_results` |
+| **Meta** | Pipeline observability | `meta_run`, `meta_source_snapshot` |
+
+The central fact table is **`fact_mention`** (grain: one article × one candidate).
+All NLP outputs — sentiment scores, frame classifications, stereotype word counts — are anchored to this grain.
+
+Full logical data model: [`docs/data-model.md`](docs/data-model.md)
+
+### End-to-End Pipeline
+
+```mermaid
+flowchart LR
+    subgraph SRC["Data Sources"]
+        A1["data.gouv.fr\nCandidates · RNE · Seats"]
+        A2["INSEE COG 2026"]
+        A3["GDELT DOC 2.0 API"]
+        A4["News websites\ntrafilatura"]
+    end
+
+    subgraph BRZ["🥉 Bronze  (raw copies, append-only)"]
+        B1["candidates_tour1/2\nseats_population · rne_incumbents"]
+        B2["cog_communes"]
+        B3["gdelt_results"]
+    end
+
+    subgraph SLV["🥈 Silver  (cleaned · validated · joined)"]
+        subgraph DIMS["Dimensions"]
+            D1["dim_commune"]
+            D2["dim_candidate_leader"]
+        end
+        subgraph FACTS["Facts"]
+            F1["fact_article"]
+            F2["fact_mention ★"]
+            F3["fact_stereotype\n_word_counts"]
+        end
+    end
+
+    subgraph NLP["🤖 NLP Pipeline"]
+        N1["① Dedup\nSentence-CamemBERT"]
+        N2["② NER\nCamemBERT-NER"]
+        N3["③ Context\nExtraction"]
+        N4["④ Sentiment\nDistilCamemBERT"]
+        N5["⑤ Frames\nCamemBERT-NLI × 6"]
+        N6["⑥ Stereotype\nLexicon counts"]
+        N1 --> N2 --> N3 --> N4 & N5 & N6
+    end
+
+    subgraph GLD["🥇 Gold  (analysis-ready aggregates)"]
+        G1["mart_exposure_metrics"]
+        G2["mart_framing_metrics"]
+        G3["mart_bias_indicators"]
+        G4["mart_regression_results"]
+    end
+
+    A1 --> B1
+    A2 --> B2
+    A3 --> B3
+    A4 --> F1
+
+    B1 & B2 --> D1 & D2
+    B3 --> F1
+
+    F1 --> NLP
+    NLP --> F2 & F3
+
+    D2 & F2 --> G1 & G2 & G3 & G4
+    G1 & G2 & G3 & G4 --> DASH["📊 Streamlit Dashboard"]
+```
+
+### Silver Layer — Entity Relationships
+
+```mermaid
+erDiagram
+    DIM_COMMUNE {
+        varchar commune_insee PK
+        varchar commune_name
+        integer population
+        varchar city_size_bucket
+    }
+
+    DIM_CANDIDATE_LEADER {
+        char    leader_id PK
+        varchar gender
+        varchar commune_insee FK
+        varchar city_size_bucket
+        varchar reg_code
+        boolean is_incumbent
+        boolean advanced_to_tour2
+    }
+
+    FACT_ARTICLE {
+        char    article_id PK
+        varchar url
+        varchar fetch_status
+        boolean is_duplicate
+        char    canonical_article_id FK
+    }
+
+    FACT_MENTION {
+        char  mention_id PK
+        char  article_id FK
+        char  leader_id FK
+        float sentiment_score
+        float prob_negative
+        float frame_politique
+        float frame_apparence
+        float stereo_famille
+        float stereo_competence
+    }
+
+    FACT_STEREOTYPE_WORD_COUNTS {
+        char    mention_id FK
+        varchar word
+        varchar category
+        float   per_1k_words
+    }
+
+    DIM_COMMUNE ||--o{ DIM_CANDIDATE_LEADER : "commune_insee"
+    DIM_CANDIDATE_LEADER ||--o{ FACT_MENTION : "leader_id"
+    FACT_ARTICLE ||--o{ FACT_MENTION : "article_id"
+    FACT_MENTION ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
+```
 
 ---
 
@@ -76,10 +210,10 @@ The analysis is organised around three layers:
 ```
 election-gender-bias_D4W/
   README.md
-  plan/               # Research design and technical planning documents
+  docs/               # Project documentation (data model, architecture)
   data/               # Data files (not committed to git)
-  src/                # Source code (forthcoming)
-  tests/              # Tests (forthcoming)
+  src/                # Source code
+  tests/              # Tests
 ```
 
 ---
