@@ -14,13 +14,17 @@ maturity. Hiring managers reading this file will see that tests are isolated,
 reproducible, and don't rely on external state.
 """
 
-import duckdb
 import pandas as pd
 import pytest
 
+try:
+    import duckdb
+except ImportError:  # pragma: no cover - depends on local test environment
+    duckdb = None
+
 
 @pytest.fixture
-def duckdb_conn() -> duckdb.DuckDBPyConnection:
+def duckdb_conn():
     """In-memory DuckDB connection — resets between tests.
 
     Why in-memory: each test gets a completely clean database state.
@@ -31,6 +35,9 @@ def duckdb_conn() -> duckdb.DuckDBPyConnection:
     Yields:
         An open DuckDB connection pointed at ':memory:'.
     """
+    if duckdb is None:
+        pytest.skip("duckdb is not installed in this test environment")
+
     conn = duckdb.connect(":memory:")
     yield conn
     conn.close()

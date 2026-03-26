@@ -1,18 +1,26 @@
 """Daily news collection DAG for the election gender bias analysis project.
 
-Orchestrates three parallel provider tasks (curated RSS/sitemap, GDELT, GNews)
-followed by output validation and observability logging. Runs daily from
-2026-03-27 to 2026-04-30 with catchup=True so missed days self-heal.
+Orchestrates two parallel provider tasks (curated RSS/sitemap, GNews) followed
+by output validation and observability logging. Runs daily from 2026-03-27 to
+2026-04-30 with catchup=True so missed days self-heal.
+
+## Why GDELT is excluded from this DAG
+
+GDELT DOC 2.0 enforces a strict inter-query rate limit: consecutive queries to
+the same endpoint must be separated by at least 2 hours. With 24 candidates,
+a full sweep requires 24 × 2h = 48 hours minimum — incompatible with a daily
+cadence. Additionally, empirical testing (2026-03-25 backfill: 24 candidates,
+analysis window 2026-02-01 to 2026-04-30) showed 0 hits, confirming that local
+French municipal candidates are not indexed at meaningful density in GDELT's
+source corpus. GDELT is retained as an on-demand one-time backfill tool via
+``airflow/dags/gdelt_backfill_dag.py`` and ``scripts/run_gdelt_backfill.py``.
 
 ## Architecture note
-
-This DAG implements the daily leg of a two-phase data acquisition strategy:
 
     Historical backfill (one-time)           Daily collection (this DAG)
     ─────────────────────────────            ─────────────────────────────
     run_gdelt_backfill_pipeline()  →         fetch_curated (24h window)
-    covers 2026-02-01 to now                 fetch_gdelt   (48h window, overlap)
-                                             fetch_gnews   (24h window)
+    covers 2026-02-01 to now                 fetch_gnews   (24h window)
                                              ↓
                                              validate_output
                                              ↓
@@ -46,17 +54,12 @@ logger = logging.getLogger(__name__)
 _DAG_START_DATE = datetime(2026, 3, 27, tzinfo=UTC)
 _DAG_END_DATE = datetime(2026, 4, 30, 23, 59, tzinfo=UTC)
 
-# GDELT uses a 2-day lookback to catch articles that appeared after yesterday's run.
-# Rationale: GDELT indexes articles with a ~1-24h lag, so a strict 24h window
-# misses same-day articles published near midnight.
-_GDELT_LOOKBACK_EXTRA_DAYS = 1
-
 _DEFAULT_MANIFEST = Path(__file__).parents[2] / "data" / "gold" / "sample_manifest.json"
 
 
 @dag(
     dag_id="daily_news_collection",
-    description="Daily curated + GDELT + GNews news collection for 24 French municipal election candidates.",
+    description="Daily curated + GNews news collection for 24 French municipal election candidates.",
     schedule="0 7 * * *",  # 07:00 UTC = 09:00 Paris time
     start_date=_DAG_START_DATE,
     end_date=_DAG_END_DATE,
@@ -115,51 +118,6 @@ def daily_news_collection_dag():
             "error_count": result.error_count,
         }
 
-    @task(task_id="fetch_gdelt")
-    def fetch_gdelt(logical_date: datetime | None = None, **context) -> dict:
-        """Fetch articles from GDELT for a 48h window (24h + 1 day overlap).
-
-        GDELT indexes with a lag of up to 24 hours, so a strict 24h window
-        would miss articles that appeared near the boundary. The extra day of
-        overlap is safe because run_gdelt_ingest deduplicates by canonical URL.
-        Window: [logical_date - 1 day, logical_date + 1 day)
-        """
-        execution_date = logical_date or context.get("logical_date")
-        if execution_date is None:
-            raise ValueError("logical_date not injected by Airflow context")
-
-        window_start = (
-            execution_date - timedelta(days=_GDELT_LOOKBACK_EXTRA_DAYS)
-        ).date()
-        window_end = (execution_date + timedelta(days=1)).date()
-
-        logger.info(
-            "fetch_gdelt: window=[%s, %s) (48h overlap window)",
-            window_start,
-            window_end,
-        )
-
-        from src.ingest.news.pipeline import run_news_ingest
-
-        result = run_news_ingest(
-            sample_manifest_path=_DEFAULT_MANIFEST,
-            provider_order=("gdelt",),
-            window_start=window_start,
-            window_end=window_end,
-        )
-        logger.info(
-            "fetch_gdelt: status=%s hits=%d errors=%d",
-            result.status,
-            result.hit_count,
-            result.error_count,
-        )
-        return {
-            "provider": "gdelt",
-            "status": result.status,
-            "hit_count": result.hit_count,
-            "error_count": result.error_count,
-        }
-
     @task(task_id="fetch_gnews")
     def fetch_gnews(logical_date: datetime | None = None, **context) -> dict:
         """Fetch articles from GNews API for the 24h window.
@@ -200,7 +158,6 @@ def daily_news_collection_dag():
     @task(task_id="validate_output")
     def validate_output(
         curated_result: dict,
-        gdelt_result: dict,
         gnews_result: dict,
         logical_date: datetime | None = None,
         **context,
@@ -211,16 +168,8 @@ def daily_news_collection_dag():
         expected on days with no qualifying articles and should not fail the DAG.
         Raises ValueError if any provider reported errors, so the retry policy fires.
         """
-        total_hits = (
-            curated_result["hit_count"]
-            + gdelt_result["hit_count"]
-            + gnews_result["hit_count"]
-        )
-        total_errors = (
-            curated_result["error_count"]
-            + gdelt_result["error_count"]
-            + gnews_result["error_count"]
-        )
+        total_hits = curated_result["hit_count"] + gnews_result["hit_count"]
+        total_errors = curated_result["error_count"] + gnews_result["error_count"]
 
         execution_date = logical_date or context.get("logical_date")
         logger.info(
@@ -233,7 +182,7 @@ def daily_news_collection_dag():
         if total_errors > 0:
             raise ValueError(
                 f"Provider errors detected: curated={curated_result['error_count']} "
-                f"gdelt={gdelt_result['error_count']} gnews={gnews_result['error_count']}"
+                f"gnews={gnews_result['error_count']}"
             )
 
         if total_hits == 0:
@@ -246,9 +195,7 @@ def daily_news_collection_dag():
         return {
             "total_hits": total_hits,
             "providers_with_hits": sum(
-                1
-                for r in (curated_result, gdelt_result, gnews_result)
-                if r["hit_count"] > 0
+                1 for r in (curated_result, gnews_result) if r["hit_count"] > 0
             ),
         }
 
@@ -276,12 +223,11 @@ def daily_news_collection_dag():
         # for the Airflow UI task log viewer.
 
     # ── DAG wiring ────────────────────────────────────────────────────────────
-    # Three fetch tasks run in parallel (independent providers, separate rate limits).
-    # validate_output fans in all three results before log_run_meta.
+    # Two fetch tasks run in parallel (independent providers, separate rate limits).
+    # validate_output fans in both results before log_run_meta.
     curated = fetch_curated()
-    gdelt = fetch_gdelt()
     gnews = fetch_gnews()
-    validation = validate_output(curated, gdelt, gnews)
+    validation = validate_output(curated, gnews)
     log_run_meta(validation)
 
 

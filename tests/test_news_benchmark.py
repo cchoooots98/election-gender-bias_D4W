@@ -1,7 +1,8 @@
-﻿"""Tests for the hybrid news benchmark and provider contracts."""
+"""Tests for the hybrid news benchmark and provider contracts."""
 
 from __future__ import annotations
 
+import ast
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ import pandas as pd
 import pytest
 import requests
 
+from scripts import run_daily_news_collection as daily_collection_module
 from src.cli import run_news_benchmark as cli_module
 from src.config import news_outlets
 from src.ingest.news import benchmark, pipeline, queries, storage
@@ -254,6 +256,58 @@ def test_search_gnews_candidate_maps_success_response_to_hits(monkeypatch):
     assert result.hits[0].published_at == datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
 
 
+def test_search_gnews_candidate_paginates_across_pages(monkeypatch):
+    """Regression: GNews pagination should accumulate results across pages."""
+    candidate_case = _candidate_case()
+    response_pages = iter(
+        [
+            MockResponse(
+                url="https://gnews.io/api/v4/search?q=precigout&page=1",
+                json_payload={
+                    "articles": [
+                        {
+                            "url": "https://www.leparisien.fr/article-123",
+                            "title": "Page 1 hit A",
+                            "publishedAt": "2026-03-10T12:00:00Z",
+                        },
+                        {
+                            "url": "https://www.lefigaro.fr/article-456",
+                            "title": "Page 1 hit B",
+                            "publishedAt": "2026-03-10T13:00:00Z",
+                        },
+                    ]
+                },
+            ),
+            MockResponse(
+                url="https://gnews.io/api/v4/search?q=precigout&page=2",
+                json_payload={
+                    "articles": [
+                        {
+                            "url": "https://www.franceinfo.fr/article-789",
+                            "title": "Page 2 hit",
+                            "publishedAt": "2026-03-11T09:00:00Z",
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(gnews, "GNEWS_API_KEY", "test-key")
+    monkeypatch.setattr(gnews, "GNEWS_MAX_ARTICLES_PER_PAGE", 2)
+    monkeypatch.setattr(gnews, "GNEWS_MAX_PAGES_PER_QUERY", 3)
+    monkeypatch.setattr(
+        gnews.requests, "get", lambda *args, **kwargs: next(response_pages)
+    )
+
+    result = gnews.search_gnews_candidate(candidate_case)
+
+    assert result.status == "success_hits"
+    assert len(result.hits) == 3
+    assert len(result.raw_documents) == 2
+    assert result.request_url.count("page=") == 2
+
+
 def test_search_curated_outlets_skips_parse_errors_instead_of_crashing(monkeypatch):
     """Regression: malformed connector payloads should degrade to warnings, not abort the run."""
     candidate_case = _candidate_case()
@@ -338,7 +392,7 @@ def test_persist_provider_query_result_logs_snapshot_and_writes_parquet(
     tmp_path,
     monkeypatch,
 ):
-    """Happy path: raw payloads and bronze hits should both be materialized."""
+    """Happy path: raw payloads, bronze hits, and query audit should all be materialized safely."""
     candidate_case = _candidate_case()
     provider_result = ProviderQueryResult(
         provider="gnews",
@@ -355,14 +409,17 @@ def test_persist_provider_query_result_logs_snapshot_and_writes_parquet(
         raw_documents=(
             RawDocument(
                 raw_document_key="raw-doc-1",
-                source_url="https://gnews.io/api/v4/search?q=precigout",
+                source_url="https://gnews.io/api/v4/search?q=precigout&apikey=secret",
                 payload={
                     "articles": [{"url": "https://www.leparisien.fr/article-123"}]
                 },
                 row_count=1,
                 partition_date="2026-03-09",
+                storage_key_name="leader_id",
+                storage_key=candidate_case.leader_id,
             ),
         ),
+        request_url="https://gnews.io/api/v4/search?q=precigout&apikey=secret",
     )
     logged_snapshots: list[dict[str, object]] = []
 
@@ -380,13 +437,127 @@ def test_persist_provider_query_result_logs_snapshot_and_writes_parquet(
         duckdb_path=tmp_path / "warehouse.duckdb",
     )
 
-    assert len(artifact_paths) == 2
+    assert len(artifact_paths) == 3
     assert len(logged_snapshots) == 1
     assert Path(updated_result.hits[0].raw_payload_path).exists()
+    assert "apikey=" not in logged_snapshots[0]["source_url"]
+    assert artifact_paths[0].name.startswith("doc_")
+    assert candidate_case.leader_id not in str(artifact_paths[0])
+    assert "raw-doc-1" not in str(artifact_paths[0])
 
-    bronze_df = pd.read_parquet(artifact_paths[-1])
+    raw_payload = json.loads(Path(artifact_paths[0]).read_text(encoding="utf-8"))
+    assert raw_payload["raw_document_key"] == "raw-doc-1"
+    assert "apikey=" not in raw_payload["request_url"]
+
+    bronze_df = pd.read_parquet(artifact_paths[-2])
     assert bronze_df.loc[0, "provider"] == "gnews"
     assert bronze_df.loc[0, "_query_status"] == "success_hits"
+    assert "apikey=" not in bronze_df.loc[0, "_source_url"]
+
+    query_audit_df = pd.read_parquet(artifact_paths[-1])
+    assert query_audit_df.loc[0, "provider_status"] == "success_hits"
+    assert "apikey=" not in query_audit_df.loc[0, "request_url"]
+
+
+def test_persist_provider_query_result_fails_fast_when_path_budget_is_exceeded(
+    tmp_path,
+    monkeypatch,
+):
+    """Regression: storage should raise a readable path-budget error before file I/O fails."""
+    candidate_case = _candidate_case()
+    provider_result = ProviderQueryResult(
+        provider="gnews",
+        provider_tier="tier3_api",
+        status="success_hits",
+        hits=(),
+        raw_documents=(
+            RawDocument(
+                raw_document_key="search_2026-03-21_"
+                f"{candidate_case.leader_id}_page_1",
+                source_url="https://gnews.io/api/v4/search?q=precigout&apikey=secret",
+                payload={"articles": []},
+                row_count=0,
+                partition_date="2026-03-21",
+                storage_key_name="leader_id",
+                storage_key=candidate_case.leader_id,
+            ),
+        ),
+        request_url="https://gnews.io/api/v4/search?q=precigout&apikey=secret",
+    )
+
+    monkeypatch.setattr(storage, "FILESYSTEM_PATH_BUDGET", 120)
+
+    with pytest.raises(ValueError, match="Path budget exceeded for raw news payload"):
+        storage.persist_provider_query_result(
+            candidate_case=candidate_case,
+            provider_result=provider_result,
+            raw_dir=tmp_path / "raw",
+            bronze_dir=tmp_path / "bronze",
+            duckdb_path=tmp_path / "warehouse.duckdb",
+        )
+
+
+def test_build_results_dataframe_keeps_explicit_provider_tier_columns():
+    """Regression: benchmark joins must not emit pandas default _x/_y suffix columns."""
+    discovery_df = pd.DataFrame(
+        [
+            {
+                "leader_id": "leader-001",
+                "provider": "gnews",
+                "provider_tier": "tier3_api",
+                "outlet_key": "leparisien.fr",
+                "canonical_url": "https://www.leparisien.fr/article-123",
+                "article_url": "https://www.leparisien.fr/article-123",
+                "title": "Candidate profile",
+                "published_at": datetime(2026, 3, 10, 12, 0, tzinfo=UTC),
+                "domain": "leparisien.fr",
+                "language": "fr",
+                "raw_payload_path": "raw-doc-1",
+                "query_text": '"Sandrine Precigout" "Terres-de-Haute-Charente"',
+                "query_strategy": "gnews_search",
+                "article_id": "article-001",
+                "discovery_id": "discovery-001",
+                "partition_date": "2026-03-10",
+            }
+        ]
+    )
+    benchmark_cases = [
+        benchmark.BenchmarkCase(
+            benchmark_case_id="truth-001",
+            leader_id="leader-001",
+            expected_outlet_key="leparisien.fr",
+            manual_article_url="https://www.leparisien.fr/article-123",
+            manual_title="Candidate profile",
+            manual_published_at=date(2026, 3, 10),
+        )
+    ]
+    provider_query_rows = [
+        {
+            "leader_id": "leader-001",
+            "full_name": "PRÉCIGOUT Sandrine",
+            "commune_name": "Terres-de-Haute-Charente",
+            "provider": "gnews",
+            "provider_tier": "tier3_api",
+            "provider_status": "success_hits",
+            "provider_error_type": "",
+            "provider_warning_count": 0,
+            "provider_hit_count": 1,
+            "request_url": "https://gnews.io/api/v4/search?q=precigout",
+        }
+    ]
+
+    results_df = benchmark._build_results_dataframe(
+        discovery_df=discovery_df,
+        benchmark_cases=benchmark_cases,
+        provider_query_rows=provider_query_rows,
+        article_fetch_results={},
+    )
+
+    assert "provider_tier" in results_df.columns
+    assert "query_provider_tier" in results_df.columns
+    assert not any(
+        column_name.endswith(("_x", "_y")) for column_name in results_df.columns
+    )
 
 
 def test_run_news_benchmark_writes_expected_artifacts(tmp_path):
@@ -520,29 +691,207 @@ def test_run_news_ingest_consumes_manifest_and_marks_partial_on_provider_error(
         ),
     }
 
-    monkeypatch.setattr(
-        pipeline,
-        "get_provider_runner",
-        lambda provider_name: lambda candidate_case: provider_results[provider_name],
-    )
-    monkeypatch.setattr(
-        pipeline,
-        "persist_provider_query_result",
-        lambda candidate_case, provider_result, **kwargs: (provider_result, ()),
-    )
-
     result = pipeline.run_news_ingest(
         sample_manifest_path=manifest_path,
         provider_order=("curated", "gdelt"),
         raw_dir=tmp_path / "raw",
         bronze_dir=tmp_path / "bronze",
         duckdb_path=tmp_path / "warehouse.duckdb",
+        provider_runner_resolver=lambda provider_name: (
+            lambda candidate_case: provider_results[provider_name]
+        ),
+        provider_result_persister=lambda candidate_case, provider_result, **kwargs: (
+            provider_result,
+            (),
+        ),
+        raw_document_persister=lambda **kwargs: ({}, ()),
+        curated_source_fetcher=lambda **kwargs: curated.CuratedSourceBundle(
+            raw_documents=(),
+            fetched_documents=(),
+            outlet_snapshots=(),
+            request_urls=(),
+            warning_count=0,
+            successful_documents=1,
+        ),
+        curated_candidate_matcher=lambda bundle, candidate_case, include_raw_documents=False: provider_results[
+            "curated"
+        ],
     )
 
     assert result.status == "partial"
     assert result.query_count == 2
     assert result.hit_count == 1
     assert result.error_count == 1
+
+
+def test_run_news_ingest_applies_gnews_overlap_for_one_day_window(tmp_path):
+    """Regression: one-day GNews windows should roll back one extra day for delay overlap."""
+    manifest_path = tmp_path / "sample_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "leader_id": "leader-001",
+                        "full_name": "PRÉCIGOUT Sandrine",
+                        "commune_name": "Terres-de-Haute-Charente",
+                        "dep_code": "16",
+                        "city_size_bucket": "small",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observed_windows: list[tuple[date, date]] = []
+
+    def _gnews_runner(candidate_case):
+        observed_windows.append(
+            (candidate_case.window_start, candidate_case.window_end)
+        )
+        return ProviderQueryResult(
+            provider="gnews",
+            provider_tier="tier3_api",
+            status="success_zero",
+        )
+
+    result = pipeline.run_news_ingest(
+        sample_manifest_path=manifest_path,
+        provider_order=("gnews",),
+        window_start=date(2026, 3, 25),
+        window_end=date(2026, 3, 26),
+        provider_runner_resolver=lambda provider_name: _gnews_runner,
+        provider_result_persister=lambda candidate_case, provider_result, **kwargs: (
+            provider_result,
+            (),
+        ),
+    )
+
+    assert result.status == "success"
+    assert observed_windows == [(date(2026, 3, 24), date(2026, 3, 26))]
+
+
+def test_run_daily_collection_passes_window_aliases_to_ingest(monkeypatch, tmp_path):
+    """Regression: the daily runner must keep using the alias-based ingest window contract."""
+    observed_calls: list[dict[str, object]] = []
+
+    def _stub_run_news_ingest(**kwargs):
+        observed_calls.append(kwargs)
+        return SimpleNamespace(status="success", hit_count=1, error_count=0)
+
+    monkeypatch.setattr(
+        daily_collection_module, "run_news_ingest", _stub_run_news_ingest
+    )
+
+    summary = daily_collection_module.run_daily_collection(
+        window_date=date(2026, 3, 25),
+        providers=("curated", "gnews"),
+        sample_manifest_path=tmp_path / "sample_manifest.json",
+    )
+
+    assert summary["total_hits"] == 2
+    assert [call["provider_order"] for call in observed_calls] == [
+        ("curated",),
+        ("gnews",),
+    ]
+    assert [call["window_start"] for call in observed_calls] == [
+        date(2026, 3, 25),
+        date(2026, 3, 25),
+    ]
+    assert [call["window_end"] for call in observed_calls] == [
+        date(2026, 3, 26),
+        date(2026, 3, 26),
+    ]
+
+
+def test_daily_news_collection_dag_calls_run_news_ingest_with_window_aliases():
+    """Regression: DAG tasks must keep calling run_news_ingest with window aliases."""
+    dag_source_path = Path("airflow/dags/daily_news_collection_dag.py")
+    dag_tree = ast.parse(dag_source_path.read_text(encoding="utf-8"))
+
+    run_news_ingest_keywords = []
+    for node in ast.walk(dag_tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run_news_ingest"
+        ):
+            run_news_ingest_keywords.append(
+                {keyword.arg for keyword in node.keywords if keyword.arg}
+            )
+
+    assert len(run_news_ingest_keywords) == 2
+    for keyword_names in run_news_ingest_keywords:
+        assert "window_start" in keyword_names
+        assert "window_end" in keyword_names
+
+
+def test_run_news_ingest_fetches_curated_sources_once_per_window(tmp_path):
+    """Regression: curated source documents should be fetched once, then matched for each candidate."""
+    manifest_path = tmp_path / "sample_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "candidates": [
+                    {
+                        "leader_id": "leader-001",
+                        "full_name": "PRÉCIGOUT Sandrine",
+                        "commune_name": "Terres-de-Haute-Charente",
+                        "dep_code": "16",
+                        "city_size_bucket": "small",
+                    },
+                    {
+                        "leader_id": "leader-002",
+                        "full_name": "DECAGNY Arnaud",
+                        "commune_name": "Maubeuge",
+                        "dep_code": "59",
+                        "city_size_bucket": "medium",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fetch_calls: list[tuple[date, date]] = []
+    match_calls: list[str] = []
+
+    def _fetch_bundle(**kwargs):
+        fetch_calls.append((kwargs["window_start"], kwargs["window_end"]))
+        return curated.CuratedSourceBundle(
+            raw_documents=(),
+            fetched_documents=(),
+            outlet_snapshots=(),
+            request_urls=(),
+            warning_count=0,
+            successful_documents=1,
+        )
+
+    def _match_bundle(bundle, candidate_case, include_raw_documents=False):
+        del bundle, include_raw_documents
+        match_calls.append(candidate_case.leader_id)
+        return ProviderQueryResult(
+            provider="curated",
+            provider_tier="tier1_curated",
+            status="success_zero",
+        )
+
+    result = pipeline.run_news_ingest(
+        sample_manifest_path=manifest_path,
+        provider_order=("curated",),
+        raw_document_persister=lambda **kwargs: ({}, ()),
+        provider_result_persister=lambda candidate_case, provider_result, **kwargs: (
+            provider_result,
+            (),
+        ),
+        curated_source_fetcher=_fetch_bundle,
+        curated_candidate_matcher=_match_bundle,
+    )
+
+    assert result.status == "success"
+    assert fetch_calls == [(date(2026, 2, 1), date(2026, 4, 30))]
+    assert match_calls == ["leader-001", "leader-002"]
 
 
 def test_news_benchmark_pipeline_logs_meta_run_and_returns_runner_result(
@@ -728,3 +1077,139 @@ def test_search_curated_outlets_expands_sitemap_index_and_verifies_article_body(
     assert result.outlet_diagnostics[0].entry_count == 1
     assert result.outlet_diagnostics[0].window_entry_count == 1
     assert result.outlet_diagnostics[0].hit_count == 1
+
+
+# ── Sitemap index <lastmod> filtering ────────────────────────────────────────
+
+
+def test_iter_sitemap_index_entries_returns_url_and_lastmod():
+    """Happy path: entries with <lastmod> return (url, datetime), entries without return (url, None)."""
+    import xml.etree.ElementTree as ET
+
+    xml_text = """
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap>
+            <loc>https://example.fr/sitemap-2026.xml</loc>
+            <lastmod>2026-03-15T00:00:00+00:00</lastmod>
+          </sitemap>
+          <sitemap>
+            <loc>https://example.fr/sitemap-old.xml</loc>
+          </sitemap>
+        </sitemapindex>
+    """.strip()
+    root = ET.fromstring(xml_text)
+    entries = list(curated._iter_sitemap_index_entries_from_root(root))
+
+    assert len(entries) == 2
+    url_0, lastmod_0 = entries[0]
+    assert url_0 == "https://example.fr/sitemap-2026.xml"
+    assert lastmod_0 is not None
+    assert lastmod_0.year == 2026
+
+    url_1, lastmod_1 = entries[1]
+    assert url_1 == "https://example.fr/sitemap-old.xml"
+    assert lastmod_1 is None
+
+
+def test_iter_sitemap_index_urls_wraps_entries():
+    """_iter_sitemap_index_urls_from_root must remain backward-compatible (URL-only)."""
+    import xml.etree.ElementTree as ET
+
+    xml_text = """
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap><loc>https://example.fr/a.xml</loc></sitemap>
+          <sitemap><loc>https://example.fr/b.xml</loc></sitemap>
+        </sitemapindex>
+    """.strip()
+    root = ET.fromstring(xml_text)
+    urls = list(curated._iter_sitemap_index_urls_from_root(root))
+
+    assert urls == ["https://example.fr/a.xml", "https://example.fr/b.xml"]
+
+
+def test_search_curated_outlets_sitemap_lastmod_skips_stale_children(monkeypatch):
+    """Regression: child sitemaps with lastmod before window_start must not be fetched.
+
+    This is the core performance fix for historical_capable outlets:
+    marsactu.fr and rue89strasbourg.com each have ~50 child sitemaps dating
+    back to 2012–2015. Without lastmod filtering, all 50 are fetched per candidate.
+    With filtering, only the 1–2 recent ones are fetched.
+    """
+    candidate_case = CandidateQueryCase(
+        leader_id="leader-yaich",
+        full_name="YAÏCH Daisy",
+        commune_name="Marseille",
+        dep_code="13",
+        city_size_bucket="large",
+        window_start=date(2026, 3, 9),
+        window_end=date(2026, 3, 22),
+    )
+
+    # Sitemap index: three children.
+    #   - stale-2015: lastmod=2015-01-01 → far before window → MUST be skipped
+    #   - recent-2026: lastmod=2026-03-10 → within window → MUST be fetched
+    #   - no-lastmod: no <lastmod> element → recency unknown → MUST be fetched
+    sitemap_index_xml = """
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap>
+            <loc>https://marsactu.fr/sitemap-stale-2015.xml</loc>
+            <lastmod>2015-01-01T00:00:00+00:00</lastmod>
+          </sitemap>
+          <sitemap>
+            <loc>https://marsactu.fr/sitemap-recent-2026.xml</loc>
+            <lastmod>2026-03-10T00:00:00+00:00</lastmod>
+          </sitemap>
+          <sitemap>
+            <loc>https://marsactu.fr/sitemap-no-lastmod.xml</loc>
+          </sitemap>
+        </sitemapindex>
+    """.strip()
+    # Recent child sitemap: one article in the window
+    recent_child_xml = """
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url>
+            <loc>https://marsactu.fr/article-no-name-match.html</loc>
+            <lastmod>2026-03-10T10:00:00+00:00</lastmod>
+          </url>
+        </urlset>
+    """.strip()
+    # No-lastmod child sitemap: empty (no matching articles)
+    no_lastmod_child_xml = """
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        </urlset>
+    """.strip()
+    _empty_rss = (
+        '<?xml version="1.0"?>'
+        '<rss version="2.0"><channel><title>Marsactu</title></channel></rss>'
+    )
+
+    fetched_urls: list[str] = []
+
+    def _fetch_document(url: str):
+        fetched_urls.append(url)
+        if url == "https://marsactu.fr/feed":
+            return _empty_rss, url, None
+        if url == "https://marsactu.fr/sitemap_index.xml":
+            return sitemap_index_xml, url, None
+        if url == "https://marsactu.fr/sitemap-recent-2026.xml":
+            return recent_child_xml, url, None
+        if url == "https://marsactu.fr/sitemap-no-lastmod.xml":
+            return no_lastmod_child_xml, url, None
+        raise AssertionError(
+            f"Unexpected URL fetched (stale sitemap was not skipped): {url}"
+        )
+
+    monkeypatch.setattr(curated, "ACTIVE_CURATED_OUTLET_KEYS", ("marsactu.fr",))
+    monkeypatch.setattr(curated, "_fetch_xml_document", _fetch_document)
+
+    result = curated.search_curated_outlets(candidate_case)
+
+    # stale-2015 must never appear in fetched URLs
+    assert (
+        "https://marsactu.fr/sitemap-stale-2015.xml" not in fetched_urls
+    ), "Stale sitemap (lastmod=2015) was fetched despite being before window_start"
+    # recent-2026 and no-lastmod must be fetched
+    assert "https://marsactu.fr/sitemap-recent-2026.xml" in fetched_urls
+    assert "https://marsactu.fr/sitemap-no-lastmod.xml" in fetched_urls
+    # No articles matched the candidate name, so result is zero hits
+    assert result.status in {"success_zero", "error"}

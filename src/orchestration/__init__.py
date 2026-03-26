@@ -1,8 +1,8 @@
-"""Reusable orchestration helpers for runnable project slices."""
+﻿"""Reusable orchestration helpers for runnable project slices.
 
-from src.orchestration.sampling_pipeline import (
-    SamplingPipelineResult,
-    run_sampling_pipeline,
-)
+Keep package import lightweight: concrete runners live in submodules and may
+require optional runtime dependencies. Import them directly from their module,
+for example ``src.orchestration.news_benchmark_pipeline``.
+"""
 
-__all__ = ["SamplingPipelineResult", "run_sampling_pipeline"]
+__all__ = []

@@ -11,6 +11,8 @@ readme = "README.md"
 
 [project.scripts]
 run-sampling-pipeline = "src.cli.run_sampling_pipeline:main"
+run-news-benchmark = "src.cli.run_news_benchmark:main"
+run-gdelt-backfill = "src.cli.run_gdelt_backfill:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]
@@ -44,3 +46,5 @@ known-first-party = ["src"]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
 pythonpath = ["."]
+
+

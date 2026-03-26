@@ -18,6 +18,7 @@ requests        # HTTP client for data.gouv.fr, INSEE, GDELT API calls
 trafilatura     # Battle-tested article text extractor (handles French news sites)
 openpyxl        # Required by pandas read_excel() for .xlsx source files (seats/population)
 rapidfuzz       # Fast fuzzy string matching for RNE incumbent name matching (token_sort_ratio)
+pyyaml          # YAML benchmark manifest for multi-source news coverage tests
 
 # ── Data analysis ─────────────────────────────────────────────────────────────
 pandas          # DataFrame manipulation; used at silver/gold boundaries

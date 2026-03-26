@@ -1,0 +1,94 @@
+benchmark_window:
+  start_date: "2026-03-09"
+  end_date: "2026-03-22"
+
+# Active outlets as of 2026-03-26 probe. All have confirmed RSS or sitemap access.
+# marsactu.fr and rue89strasbourg.com are historical_capable (sitemap back to 2015/2012)
+# but cover Marseille and Strasbourg respectively — outside the current candidate set.
+# Future benchmark waves should add Marseille/Strasbourg candidates to exercise the
+# historical sitemap path end-to-end.
+curated_outlets:
+  - lemonde.fr
+  - lefigaro.fr
+  - franceinfo.fr
+  - leparisien.fr
+  - bfmtv.com
+  - mediapart.fr
+  - marsactu.fr
+  - rue89strasbourg.com
+  - lyoncapitale.fr
+
+candidates:
+  - leader_id: "431ebb4e39a4866559d907b6e2687f11"
+    full_name: "BAGUET Pierre-Christophe"
+    commune_name: "Boulogne-Billancourt"
+    dep_code: "92"
+    city_size_bucket: "large"
+  - leader_id: "6bd6b2af789ccf501af70e26d14c2657"
+    full_name: "DUCLOS Erell"
+    commune_name: "Rennes"
+    dep_code: "35"
+    city_size_bucket: "large"
+  - leader_id: "ff338e2433b13adb7a5361dbe7c0289b"
+    full_name: "YAÏCH Daisy"
+    commune_name: "Cergy"
+    dep_code: "95"
+    city_size_bucket: "medium"
+  - leader_id: "d3dd961da4f3e138501d8505204405f9"
+    full_name: "DECAGNY Arnaud"
+    commune_name: "Maubeuge"
+    dep_code: "59"
+    city_size_bucket: "medium"
+  - leader_id: "dbfbb8d868386c7f4fe3552f766a5d24"
+    full_name: "PRÉCIGOUT Sandrine"
+    commune_name: "Terres-de-Haute-Charente"
+    dep_code: "16"
+    city_size_bucket: "small"
+
+# Manual truth articles — confirmed reachable via active curated outlets.
+#
+# Removed from earlier version (probe 2026-03-26 found these sources blocked):
+#   truth-duclos-002  actu.fr          http_403 — bot detection
+#   truth-yaïch-003   actu.fr          http_403 — bot detection
+#   truth-decagny-004 lavoixdunord.fr  http_403 — bot detection
+#
+# Benchmark ceiling with current active outlets:
+#   4 truth articles remain (3 × leparisien.fr RSS, 1 × france3-regions/franceinfo.fr)
+#   Theoretical maximum recall = 4/4 = 100% if leparisien RSS retains the articles
+#   (RSS window ~100 items; articles older than ~5 days may have expired)
+#   GNews supplements recall for candidates with expired RSS coverage.
+#
+# To raise the recall ceiling above 4/4, add Marseille and/or Strasbourg candidates
+# to the benchmark so marsactu.fr and rue89strasbourg.com historical sitemaps are tested.
+manual_truth_articles:
+  - benchmark_case_id: "truth-baguet-001"
+    leader_id: "431ebb4e39a4866559d907b6e2687f11"
+    expected_outlet_key: "leparisien.fr"
+    manual_article_url: "https://www.leparisien.fr/elections/municipales/municipales-2026-a-boulogne-billancourt-pierre-christophe-baguet-lr-largement-en-tete-mais-contraint-a-un-second-tour-15-03-2026-CAXDWZDWKRFHFOJQQ2KOG3B3PI.php"
+    manual_title: "Municipales 2026 à Boulogne-Billancourt : Pierre-Christophe Baguet (LR) largement en tête mais contraint à un second tour"
+    manual_published_at: "2026-03-15"
+
+  - benchmark_case_id: "truth-baguet-006"
+    leader_id: "431ebb4e39a4866559d907b6e2687f11"
+    expected_outlet_key: "leparisien.fr"
+    manual_article_url: "https://www.leparisien.fr/elections/municipales/municipales-a-boulogne-billancourt-suivez-les-resultats-du-second-tour-22-03-2026-CKOPS6V7GVCV3LCVX43BKGSCP4.php"
+    manual_title: "Municipales à Boulogne-Billancourt : Pierre-Christophe Baguet (LR) réélu"
+    manual_published_at: "2026-03-22"
+
+  - benchmark_case_id: "truth-yaïch-007"
+    leader_id: "ff338e2433b13adb7a5361dbe7c0289b"
+    expected_outlet_key: "leparisien.fr"
+    manual_article_url: "https://www.leparisien.fr/elections/municipales/municipales-a-cergy-une-triangulaire-entre-les-deux-gauches-avec-la-droite-en-embuscade-16-03-2026-33VKSSWA35HLTCKNMBUAQQ6BLQ.php"
+    manual_title: "Municipales à Cergy : une triangulaire entre les « deux gauches » avec la droite en embuscade"
+    manual_published_at: "2026-03-16"
+
+  - benchmark_case_id: "truth-précigout-005"
+    leader_id: "dbfbb8d868386c7f4fe3552f766a5d24"
+    # URL is on france3-regions.franceinfo.fr subdomain; expected_outlet_key maps
+    # to the franceinfo.fr catalog entry. The national RSS (francetvinfo.fr/titres.rss)
+    # is unlikely to carry regional content — this article may only be findable via
+    # GNews. Keep for recall accounting; do not count as curated-connector success.
+    expected_outlet_key: "franceinfo.fr"
+    manual_article_url: "https://france3-regions.franceinfo.fr/nouvelle-aquitaine/charente/angouleme/resultats-1er-tour-municipales-2026-par-commune-en-charente-angouleme-cognac-soyaux-3308664.html"
+    manual_title: "RESULTATS. 1er tour Municipales 2026 en Charente : le maire de Cognac réélu au premier tour, le maire d'Angoulême en tête face à huit candidats"
+    manual_published_at: "2026-03-15"

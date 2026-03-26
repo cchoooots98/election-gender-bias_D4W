@@ -23,6 +23,12 @@ from dotenv import load_dotenv
 # take precedence over the .env file — important for reproducible CI runs.
 load_dotenv(override=False)
 
+
+def _parse_csv_env(value: str) -> tuple[str, ...]:
+    """Parse a comma-separated env var into a normalized tuple."""
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Configured once here; every module then calls logging.getLogger(__name__).
 # ISO-8601 timestamps make log correlation with external systems straightforward.
@@ -71,6 +77,33 @@ GDELT_MAX_RECORDS: int = int(os.getenv("GDELT_MAX_RECORDS", "250"))
 GDELT_REQUEST_DELAY_SECONDS: float = float(
     os.getenv("GDELT_REQUEST_DELAY_SECONDS", "2")
 )
+
+# Hybrid discovery order for the main ingest path. We keep GDELT out of the
+# default fast path because its public API is rate-limited aggressively; the
+# project already exposes a dedicated ``run_gdelt_ingest`` wrapper for slower
+# backfill-style runs.
+NEWS_PROVIDER_ORDER: tuple[str, ...] = _parse_csv_env(
+    os.getenv("NEWS_PROVIDER_ORDER", "curated,gnews")
+)
+
+# Benchmark runs should stay comparable and operationally stable. Keeping the
+# default benchmark order to curated + GNews avoids letting GDELT's availability
+# dominate the benchmark summary; GDELT can still be benchmarked separately.
+NEWS_BENCHMARK_PROVIDER_ORDER: tuple[str, ...] = _parse_csv_env(
+    os.getenv("NEWS_BENCHMARK_PROVIDER_ORDER", "curated,gnews")
+)
+
+# Third-party benchmark API key. Optional for local development because the
+# benchmark can still run Tier 1 and Tier 2 without it; the adapter will mark
+# the provider unavailable instead of crashing.
+GNEWS_API_KEY: str = os.getenv("GNEWS_API_KEY", "")
+GNEWS_MAX_ARTICLES_PER_PAGE: int = int(os.getenv("GNEWS_MAX_ARTICLES_PER_PAGE", "10"))
+GNEWS_MAX_PAGES_PER_QUERY: int = int(os.getenv("GNEWS_MAX_PAGES_PER_QUERY", "3"))
+
+# Keep artifact paths portable across Windows and Linux. 240 leaves safety
+# margin below Windows' common 260-character MAX_PATH limit while still
+# allowing descriptive Hive-style partitions.
+FILESYSTEM_PATH_BUDGET: int = int(os.getenv("FILESYSTEM_PATH_BUDGET", "240"))
 
 # ── Web scraping ──────────────────────────────────────────────────────────────
 SCRAPE_REQUEST_TIMEOUT_SECONDS: int = int(

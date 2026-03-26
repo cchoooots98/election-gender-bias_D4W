@@ -16,12 +16,14 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 
-
-# temporary JSON dumps
+# temporary files / local smoke outputs
 *.log
 *.tmp
 .streamlit/
+tmp/
 
 # Data layers — actual data files are never committed; .gitkeep files preserve structure
 data/raw/*
@@ -31,15 +33,22 @@ data/gold/*
 data/cache/*
 !data/**/.gitkeep
 
-# DuckDB warehouse file — large binary, not committed
-warehouse/*.duckdb
+# DuckDB warehouse files — large binaries, not committed
+warehouse/*.duckdb*
 
 # dbt
 dbt/.user.yml
 dbt/profiles.yml
 
+# Airflow local runtime artifacts (keep dags/ in git, ignore runtime state)
+airflow/logs/
+airflow/airflow.db*
+airflow/airflow.cfg
+airflow/standalone_admin_password.txt
+airflow/*.pid
+
 # local planning attachments
-plan/
+plan/*
 
 
 CLAUDE.md

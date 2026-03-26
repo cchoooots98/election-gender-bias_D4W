@@ -1,12 +1,19 @@
 """Daily news collection entry point — Windows-compatible alternative to the Airflow DAG.
 
 Run once per day (e.g., via Windows Task Scheduler or manually) to collect
-articles for yesterday's 24-hour window across all three providers.
+articles for yesterday's 24-hour window via the curated and GNews providers.
+
+GDELT is intentionally excluded from the daily collection:
+  - GDELT enforces a ≥2h inter-query interval. With 24 candidates that
+    requires 24 × 2h = 48h minimum per full sweep — incompatible with daily cadence.
+  - Empirical validation (2026-03-25 backfill, 24 candidates) returned 0 hits,
+    confirming GDELT does not index local French municipal election candidates.
+  For one-time GDELT sweeps use: python scripts/run_gdelt_backfill.py
 
 Usage:
     python scripts/run_daily_news_collection.py
-    python scripts/run_daily_news_collection.py --date 2026-03-25     # specific date
-    python scripts/run_daily_news_collection.py --providers curated gdelt  # subset
+    python scripts/run_daily_news_collection.py --date 2026-03-25      # specific date
+    python scripts/run_daily_news_collection.py --providers curated     # curated only
 
 This script mirrors the logic in airflow/dags/daily_news_collection_dag.py
 but runs in a single process, making it suitable for Windows Task Scheduler
@@ -37,7 +44,10 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MANIFEST = GOLD_DIR / "sample_manifest.json"
 # GDELT indexes with a lag; extend its window by one extra day for overlap safety.
 _GDELT_LOOKBACK_EXTRA_DAYS = 1
-_ALL_PROVIDERS = ("curated", "gdelt", "gnews")
+# GDELT excluded: ≥2h inter-query constraint and 0 observed hits for French
+# municipal candidates make it unsuitable for daily collection. Use
+# scripts/run_gdelt_backfill.py for one-time GDELT sweeps.
+_ALL_PROVIDERS = ("curated", "gnews")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -53,9 +63,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--providers",
         nargs="+",
-        choices=list(_ALL_PROVIDERS),
+        choices=["curated", "gnews"],
         default=list(_ALL_PROVIDERS),
-        help="Providers to run. Defaults to all three: curated gdelt gnews.",
+        help="Providers to run. Defaults to: curated gnews.",
     )
     return parser.parse_args()
 

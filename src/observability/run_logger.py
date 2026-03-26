@@ -1,31 +1,32 @@
-"""Pipeline run observability: record data source snapshots and run metadata.
+﻿"""Pipeline run observability: record data source snapshots and run metadata.
 
 This module writes two meta tables to DuckDB:
-  meta.meta_source_snapshot — one row per source file downloaded, recording
+  meta.meta_source_snapshot -- one row per source file downloaded, recording
       URL, MD5 hash, row count, and timestamp. Enables change detection:
       if source_hash changes between runs, the source file was updated.
-  meta.meta_run — one row per sampling-pipeline run with start/end time,
+  meta.meta_run -- one row per pipeline run with start/end time,
       status, row counts, and artifact paths.
 
 Why observability matters for a portfolio project:
   A hiring manager reviewing this repo will check whether the pipeline can
-  answer "when was this data last fetched and was it different from last time?"
-  Without meta_source_snapshot, the answer is "I don't know." With it, the
-  pipeline has a complete audit trail — the same capability that dbt's
+  answer \"when was this data last fetched and was it different from last time?\"
+  Without meta_source_snapshot, the answer is \"I don't know.\" With it, the
+  pipeline has a complete audit trail -- the same capability that dbt's
   source freshness checks and Airflow's XCom provide in production systems.
 
-Industry pattern: this is the "pipeline lineage" and "data freshness" layer
+Industry pattern: this is the \"pipeline lineage\" and \"data freshness\" layer
 that platforms like Databricks Unity Catalog, Snowflake Data Lineage, and
 Atlan provide as managed services. We implement a minimal version ourselves.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-
-import duckdb
+from typing import Any
 
 from src.config.settings import WAREHOUSE_PATH
 
@@ -35,14 +36,9 @@ _CREATE_META_SCHEMA = "CREATE SCHEMA IF NOT EXISTS meta"
 
 _CREATE_SOURCE_SNAPSHOT_TABLE = """
 CREATE TABLE IF NOT EXISTS meta.meta_source_snapshot (
-    -- Stable identifier: MD5(source_key + fetched_at ISO string).
-    -- Deterministic so re-running the same ingest step on the same second
-    -- produces the same snapshot_id (idempotent insert guard).
     snapshot_id      VARCHAR     PRIMARY KEY,
     source_key       VARCHAR     NOT NULL,
     source_url       VARCHAR     NOT NULL,
-    -- MD5 of the raw downloaded file. Change detection: if source_hash
-    -- differs from the previous row for this source_key, the source updated.
     source_hash      CHAR(32)    NOT NULL,
     raw_file_path    VARCHAR     NOT NULL,
     row_count        INTEGER     NOT NULL,
@@ -64,6 +60,18 @@ CREATE TABLE IF NOT EXISTS meta.meta_run (
 """
 
 
+def _import_duckdb():
+    """Import DuckDB lazily so modules remain importable in thin environments."""
+    try:
+        import duckdb
+    except ImportError as exc:
+        raise RuntimeError(
+            "duckdb is required to write observability metadata. "
+            "Install project dependencies before running pipeline entrypoints."
+        ) from exc
+    return duckdb
+
+
 def _build_snapshot_id(source_key: str, fetched_at: datetime) -> str:
     """Generate a deterministic snapshot primary key.
 
@@ -71,7 +79,7 @@ def _build_snapshot_id(source_key: str, fetched_at: datetime) -> str:
     at the same second always produces the same ID.
 
     Args:
-        source_key: Identifier from DATA_SOURCES (e.g. 'candidates_tour1').
+        source_key: Identifier from DATA_SOURCES (for example 'candidates_tour1').
         fetched_at: UTC timestamp of the fetch.
 
     Returns:
@@ -81,7 +89,7 @@ def _build_snapshot_id(source_key: str, fetched_at: datetime) -> str:
     return hashlib.md5(raw.encode()).hexdigest()
 
 
-def _ensure_meta_tables(conn: duckdb.DuckDBPyConnection) -> None:
+def _ensure_meta_tables(conn: Any) -> None:
     """Create meta schema and tables if they do not already exist.
 
     Idempotent: safe to call on every pipeline run.
@@ -110,7 +118,7 @@ def log_source_snapshot(
     + same second), the insert is skipped (idempotent).
 
     Args:
-        source_key: Identifier from DATA_SOURCES (e.g. 'candidates_tour1').
+        source_key: Identifier from DATA_SOURCES (for example 'candidates_tour1').
         source_url: URL the file was downloaded from.
         source_hash: MD5 hex of the downloaded raw file.
         raw_file_path: Path to the saved raw file.
@@ -119,20 +127,20 @@ def log_source_snapshot(
         duckdb_path: Path to the DuckDB warehouse file.
 
     Returns:
-        The snapshot_id that was written (useful for linking to meta_run).
+        The snapshot_id that was written.
     """
     if fetched_at is None:
         fetched_at = datetime.now(UTC)
 
     snapshot_id = _build_snapshot_id(source_key, fetched_at)
 
+    duckdb = _import_duckdb()
     duckdb_path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(duckdb_path))
 
     try:
         _ensure_meta_tables(conn)
 
-        # Check if this snapshot_id already exists (idempotent guard).
         existing = conn.execute(
             "SELECT snapshot_id FROM meta.meta_source_snapshot WHERE snapshot_id = ?",
             [snapshot_id],
@@ -140,7 +148,7 @@ def log_source_snapshot(
 
         if existing:
             logger.info(
-                "Snapshot already recorded snapshot_id=%s source_key=%s — skipping",
+                "Snapshot already recorded snapshot_id=%s source_key=%s -- skipping",
                 snapshot_id,
                 source_key,
             )
@@ -168,8 +176,8 @@ def log_source_snapshot(
             "Source snapshot recorded source_key=%s rows=%d hash=%s snapshot_id=%s",
             source_key,
             row_count,
-            source_hash[:8] + "…",  # Log first 8 chars — enough for change detection
-            snapshot_id[:8] + "…",
+            source_hash[:8] + "...",
+            snapshot_id[:8] + "...",
         )
 
     finally:
@@ -185,7 +193,7 @@ def get_last_source_hash(
     """Return the most recently recorded MD5 hash for a source.
 
     Used by ingest modules to detect whether a source file has changed
-    since the last pipeline run — enabling incremental ingest decisions.
+    since the last pipeline run -- enabling incremental ingest decisions.
 
     Args:
         source_key: Identifier from DATA_SOURCES.
@@ -197,6 +205,7 @@ def get_last_source_hash(
     if not duckdb_path.exists():
         return None
 
+    duckdb = _import_duckdb()
     conn = duckdb.connect(str(duckdb_path))
     try:
         _ensure_meta_tables(conn)
@@ -228,17 +237,12 @@ def log_pipeline_run(
 ) -> str:
     """Record one pipeline run to meta.meta_run.
 
-    The current project only implements the official-data sampling slice, so
-    this table tracks that runnable subset end-to-end. The row is overwritten
-    when the same run_id is logged again, making the helper idempotent for
-    retried finalisation logic.
-
     Args:
         run_id: Unique identifier for this pipeline run.
-        flow_name: Logical pipeline name (for example "sampling_pipeline").
+        flow_name: Logical pipeline name.
         start_ts: UTC timestamp when the run started.
         end_ts: UTC timestamp when the run finished.
-        status: Final run state ("success", "partial", or "failed").
+        status: Final run state ('success', 'partial', or 'failed').
         rows_ingested: Total rows materialized by this runnable slice.
         error_count: Count of non-successful steps in this run.
         artifact_paths: Ordered list of output artifact paths.
@@ -252,6 +256,7 @@ def log_pipeline_run(
         ensure_ascii=False,
     )
 
+    duckdb = _import_duckdb()
     duckdb_path.parent.mkdir(parents=True, exist_ok=True)
     conn = duckdb.connect(str(duckdb_path))
     try:
