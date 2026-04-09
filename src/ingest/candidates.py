@@ -13,8 +13,8 @@ analysis source. Rationale: sampling from Tour 1 avoids survivorship bias
 (candidates who advanced partly benefited from media coverage we are measuring).
 The advanced_to_tour2 flag is then used as a control variable in regression.
 
-Portfolio signal: the skip-if-unchanged download pattern and per-row provenance
-columns demonstrate production-grade ingest reliability.
+Portfolio signal: the hash-based replace-if-changed download pattern and
+per-row provenance columns demonstrate production-grade ingest reliability.
 """
 
 import logging

@@ -29,6 +29,11 @@ from src.config.settings import (
     SCRAPE_REQUEST_TIMEOUT_SECONDS,
     WAREHOUSE_PATH,
 )
+from src.ingest.news.corpus import (
+    build_article_source_from_search_hits,
+    build_fact_article,
+    build_fact_article_discovery,
+)
 from src.ingest.news.models import (
     ArticleFetchResult,
     BenchmarkCase,
@@ -37,7 +42,6 @@ from src.ingest.news.models import (
     ProviderQueryResult,
 )
 from src.ingest.news.normalize import (
-    build_fact_article_frames,
     canonicalize_url,
     compute_duplicate_rate,
 )
@@ -350,8 +354,12 @@ def run_news_benchmark(
         ..., tuple[dict[str, tuple[str, str, str]], tuple[Path, ...]]
     ] = persist_raw_documents,
     article_fetcher: Callable[[str], ArticleFetchResult] = _fetch_article_text,
-    curated_source_fetcher: Callable[..., CuratedSourceBundle] = fetch_curated_source_bundle,
-    curated_candidate_matcher: Callable[..., ProviderQueryResult] = match_candidate_against_curated_bundle,
+    curated_source_fetcher: Callable[
+        ..., CuratedSourceBundle
+    ] = fetch_curated_source_bundle,
+    curated_candidate_matcher: Callable[
+        ..., ProviderQueryResult
+    ] = match_candidate_against_curated_bundle,
 ) -> BenchmarkRunResult:
     """Run the fixed multi-source benchmark and persist its artifacts."""
     run_id = pipeline_run_id or str(uuid.uuid4())
@@ -501,10 +509,18 @@ def run_news_benchmark(
             continue
         article_fetch_results[canonical_url] = article_fetcher(search_hit.article_url)
 
-    fact_article_df, discovery_df = build_fact_article_frames(
+    # Build canonical Silver tables using the same corpus.py functions as the
+    # production pipeline — ensures benchmark artifacts share the dedup schema.
+    discovery_df = build_fact_article_discovery(
         all_hits,
-        article_fetch_results,
+        provider_query_rows=provider_query_rows,
     )
+    fact_article_source_df = build_article_source_from_search_hits(
+        all_hits,
+        article_fetch_results=article_fetch_results,
+        batch_id=run_id,
+    )
+    fact_article_df = build_fact_article(fact_article_source_df)
     provider_query_df = _build_provider_query_frame(provider_query_rows)
     outlet_diagnostic_df = _build_outlet_diagnostics_frame(outlet_diagnostic_rows)
     results_df = _build_results_dataframe(

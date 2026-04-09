@@ -25,7 +25,13 @@ from src.ingest.news.models import (
     RawDocument,
     SearchHit,
 )
-from src.ingest.news.normalize import now_iso_utc, sanitize_request_url
+from src.ingest.news.normalize import (
+    now_iso_utc,
+    sanitize_request_url,
+)
+from src.ingest.news.normalize import (
+    stable_md5 as _stable_md5,
+)
 from src.observability.run_logger import log_source_snapshot
 
 logger = logging.getLogger(__name__)
@@ -86,13 +92,6 @@ def _compute_file_md5(file_path: Path) -> str:
         for chunk in iter(lambda: file_handle.read(8 * 1024 * 1024), b""):
             md5.update(chunk)
     return md5.hexdigest()
-
-
-def _stable_md5(text: str) -> str:
-    """Build a deterministic MD5 digest for short storage keys."""
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-
 def _normalize_path_token(value: str, *, max_length: int) -> str:
     """Normalize free-text values into short filesystem-safe tokens."""
     normalized = re.sub(r"[^0-9a-z]+", "_", value.strip().lower()).strip("_")

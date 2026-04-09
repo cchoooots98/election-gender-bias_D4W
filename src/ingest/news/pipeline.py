@@ -1,4 +1,30 @@
-"""Multi-source discovery pipeline for the sampled cohort."""
+"""Multi-source provider discovery pipeline for the sampled cohort.
+
+Responsibility
+--------------
+This module handles **provider discovery only**: querying GDELT, curated RSS /
+sitemap feeds, and GNews for article URLs and metadata, then persisting the raw
+results to Bronze Parquet.  It does NOT parse article bodies, deduplicate across
+sources, match candidates, or build Silver / Gold tables.
+
+For the full corpus ETL (parse → dedup → match → marts), use:
+``src.ingest.news.corpus_pipeline.run_news_corpus_etl()``
+
+Typical calling sequence
+------------------------
+::
+
+    # 1. Run provider discovery (writes to Bronze Parquet)
+    run-news-ingest
+
+    # 2. Import Europresse export + merge GDELT hits → Silver / Gold
+    run-news-corpus-pipeline [--auto-discover-gdelt]
+
+Key functions
+-------------
+``run_news_ingest``   — multi-provider discovery for all sampled candidates
+``run_gdelt_ingest``  — GDELT-only compatibility wrapper
+"""
 
 from __future__ import annotations
 

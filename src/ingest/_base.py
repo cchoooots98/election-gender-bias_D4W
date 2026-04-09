@@ -2,7 +2,8 @@
 
 This private module (underscore prefix = not public API) centralises the three
 operations that every ingest function needs:
-  1. Download a file from HTTP with retry-safe semantics and skip-if-unchanged.
+  1. Download a file from HTTP with retry-safe semantics and hash-based
+     replace-if-changed behavior.
   2. Compute an MD5 hash of a local file (streaming, safe for large files).
   3. Build the three bronze provenance columns required by every bronze Parquet file.
 
@@ -54,11 +55,11 @@ def download_raw_file(
 ) -> tuple[Path, str]:
     """Download a file to dest_path and return (path, md5_hex).
 
-    Skip-if-unchanged: if dest_path already exists, its MD5 is computed first.
-    The file is downloaded, and if the MD5 of the new content matches the
-    existing file, the new content is discarded and the existing file is kept.
-    This avoids re-writing a 137 MB file every pipeline re-run when the
-    source has not changed.
+    Replace-if-changed: if dest_path already exists, its MD5 is computed first.
+    The file is then downloaded and compared against the existing hash. When
+    the content is unchanged, the temporary download is discarded and the
+    existing file is kept in place, avoiding unnecessary local rewrites while
+    still checking the authoritative source.
 
     Note: data.gouv.fr uses HTTP redirects for its /api/1/datasets/r/<uuid>
     endpoints. requests follows redirects automatically (allow_redirects=True

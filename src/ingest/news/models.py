@@ -1,4 +1,4 @@
-"""Shared dataclasses for hybrid news ingestion."""
+"""Shared dataclasses for hybrid news ingestion and corpus ETL."""
 
 from __future__ import annotations
 
@@ -147,3 +147,57 @@ class NewsIngestRunResult:
     query_count: int
     hit_count: int
     artifact_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class NewsImportManifest:
+    """Batch-level contract for restricted or public news imports."""
+
+    batch_id: str
+    source_system: str
+    window_start: date
+    window_end: date
+    exported_at: datetime
+    operator: str
+    access_level: str
+    file_paths: tuple[str, ...]
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class ImportBatchFile:
+    """One inspected file inside an import batch."""
+
+    path: str
+    classification: Literal[
+        "table_export",
+        "document_export",
+        "pdf_text_layer",
+        "unsupported",
+    ]
+    file_type: str
+    has_text_layer: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ImportBatchInspection:
+    """Inspection output produced before parsing a news import batch."""
+
+    batch_id: str
+    source_system: str
+    files: tuple[ImportBatchFile, ...]
+    parser_mix: dict[str, int]
+
+
+@dataclass(frozen=True)
+class NewsCorpusRunResult:
+    """Summary of one source-agnostic news corpus pipeline run."""
+
+    run_id: str
+    batch_id: str
+    status: str
+    error_count: int
+    row_counts: dict[str, int]
+    artifact_paths: tuple[str, ...]
+    qa_report_path: str

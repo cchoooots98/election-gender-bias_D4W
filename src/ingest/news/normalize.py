@@ -1,9 +1,15 @@
-"""Canonicalization and silver-ready normalization helpers for news hits."""
+"""URL canonicalization and lightweight normalization utilities.
+
+These helpers are consumed by provider adapters, storage, and the benchmark
+runner.  They do **not** produce Silver-layer DataFrames — use the functions
+in ``corpus.py`` (``build_fact_article``, ``build_fact_article_discovery``,
+``build_article_source_from_search_hits``) for that purpose.
+"""
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -83,125 +89,13 @@ def sanitize_request_url(url: str) -> str:
     )
 
 
-def _stable_md5(text: str) -> str:
+def stable_md5(text: str) -> str:
     """Build a deterministic MD5 key from a text input."""
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
-def build_fact_article_frames(
-    search_hits: Iterable[SearchHit],
-    article_fetch_results: Mapping[str, ArticleFetchResult] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Convert raw search hits into canonical article and discovery tables."""
-    fetch_results = article_fetch_results or {}
-    search_hits_list = list(search_hits)
-    article_columns = [
-        "article_id",
-        "url",
-        "canonical_url",
-        "title",
-        "body_text",
-        "published_at",
-        "domain",
-        "language",
-        "fetch_status",
-        "is_duplicate",
-        "canonical_article_id",
-        "partition_date",
-    ]
-    discovery_columns = [
-        "discovery_id",
-        "article_id",
-        "leader_id",
-        "provider",
-        "provider_tier",
-        "outlet_key",
-        "article_url",
-        "canonical_url",
-        "title",
-        "published_at",
-        "domain",
-        "language",
-        "raw_payload_path",
-        "query_text",
-        "query_strategy",
-        "partition_date",
-    ]
-
-    if not search_hits_list:
-        return pd.DataFrame(columns=article_columns), pd.DataFrame(
-            columns=discovery_columns
-        )
-
-    canonical_to_hit: dict[str, SearchHit] = {}
-    discovery_rows: list[dict[str, object]] = []
-    for search_hit in search_hits_list:
-        canonical_url = canonicalize_url(search_hit.article_url)
-        canonical_to_hit.setdefault(canonical_url, search_hit)
-        article_id = _stable_md5(canonical_url)
-        partition_date = (
-            search_hit.published_at.date().isoformat()
-            if search_hit.published_at is not None
-            else ""
-        )
-        discovery_key = (
-            f"{article_id}:{search_hit.provider}:{search_hit.outlet_key}:"
-            f"{search_hit.raw_payload_path}:{search_hit.query_text}"
-        )
-        discovery_rows.append(
-            {
-                "discovery_id": _stable_md5(discovery_key),
-                "article_id": article_id,
-                "leader_id": search_hit.leader_id,
-                "provider": search_hit.provider,
-                "provider_tier": search_hit.provider_tier,
-                "outlet_key": search_hit.outlet_key,
-                "article_url": search_hit.article_url,
-                "canonical_url": canonical_url,
-                "title": search_hit.title,
-                "published_at": search_hit.published_at,
-                "domain": search_hit.domain,
-                "language": search_hit.language,
-                "raw_payload_path": search_hit.raw_payload_path,
-                "query_text": search_hit.query_text,
-                "query_strategy": search_hit.query_strategy,
-                "partition_date": partition_date,
-            }
-        )
-
-    article_rows: list[dict[str, object]] = []
-    for canonical_url, canonical_hit in canonical_to_hit.items():
-        fetch_result = fetch_results.get(
-            canonical_url,
-            ArticleFetchResult(
-                canonical_url=canonical_url,
-                fetch_status="not_fetched",
-                body_text="",
-            ),
-        )
-        partition_date = (
-            canonical_hit.published_at.date().isoformat()
-            if canonical_hit.published_at is not None
-            else ""
-        )
-        article_rows.append(
-            {
-                "article_id": _stable_md5(canonical_url),
-                "url": canonical_hit.article_url,
-                "canonical_url": canonical_url,
-                "title": canonical_hit.title,
-                "body_text": fetch_result.body_text,
-                "published_at": canonical_hit.published_at,
-                "domain": canonical_hit.domain,
-                "language": canonical_hit.language,
-                "fetch_status": fetch_result.fetch_status,
-                "is_duplicate": False,
-                "canonical_article_id": None,
-                "partition_date": partition_date,
-            }
-        )
-
-    return pd.DataFrame(article_rows), pd.DataFrame(discovery_rows)
+# Backward-compatible private alias for older imports inside this package.
+_stable_md5 = stable_md5
 
 
 def compute_duplicate_rate(search_hits: Iterable[SearchHit]) -> float | None:
@@ -216,3 +110,66 @@ def compute_duplicate_rate(search_hits: Iterable[SearchHit]) -> float | None:
 def now_iso_utc() -> str:
     """Return the current UTC timestamp as an ISO-8601 string."""
     return datetime.now(UTC).isoformat()
+
+
+def _build_compat_article_fetch_results(
+    search_hits: list[SearchHit] | tuple[SearchHit, ...],
+) -> dict[str, ArticleFetchResult]:
+    """Synthesize minimal fetch results for compatibility-only callers.
+
+    The benchmark suite historically called ``build_fact_article_frames`` with
+    search hits only. The new corpus contract expects fetched article bodies, so
+    this helper creates deterministic placeholder bodies from the hit metadata.
+    That preserves the old import surface without reintroducing duplicate ETL
+    logic into ``normalize.py``.
+    """
+    fetch_results: dict[str, ArticleFetchResult] = {}
+    for hit in search_hits:
+        canonical_url = canonicalize_url(hit.article_url)
+        body_text = hit.title.strip() or hit.query_text.strip() or canonical_url
+        fetch_results.setdefault(
+            canonical_url,
+            ArticleFetchResult(
+                canonical_url=canonical_url,
+                fetch_status="synthetic_search_hit_body",
+                body_text=body_text,
+            ),
+        )
+    return fetch_results
+
+
+def build_fact_article_frames(
+    search_hits: list[SearchHit] | tuple[SearchHit, ...],
+    article_fetch_results: dict[str, ArticleFetchResult] | None = None,
+    provider_query_rows: list[dict[str, object]] | None = None,
+    *,
+    batch_id: str = "compat_build_fact_article_frames",
+    source_system: str = "compat_provider",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compatibility wrapper for benchmark callers expecting article frames.
+
+    ``corpus.py`` owns the canonical DataFrame-building logic. This wrapper
+    keeps the older import path stable for tests and lightweight scripts while
+    delegating all real work to the corpus-layer contracts.
+    """
+    from src.ingest.news.corpus import (
+        build_article_source_from_search_hits,
+        build_fact_article,
+        build_fact_article_discovery,
+    )
+
+    effective_fetch_results = (
+        article_fetch_results or _build_compat_article_fetch_results(search_hits)
+    )
+    fact_article_source_df = build_article_source_from_search_hits(
+        search_hits=search_hits,
+        article_fetch_results=effective_fetch_results,
+        batch_id=batch_id,
+        source_system=source_system,
+    )
+    fact_article_df = build_fact_article(fact_article_source_df)
+    discovery_df = build_fact_article_discovery(
+        search_hits=search_hits,
+        provider_query_rows=provider_query_rows,
+    )
+    return fact_article_df, discovery_df

@@ -354,9 +354,11 @@ def _count_window_entries(
         1
         for entry in entries
         if _entry_within_window_bounds(
-            entry.get("published_at")
-            if isinstance(entry.get("published_at"), datetime)
-            else None,
+            (
+                entry.get("published_at")
+                if isinstance(entry.get("published_at"), datetime)
+                else None
+            ),
             window_start=window_start,
             window_end=window_end,
         )
@@ -613,7 +615,9 @@ def match_candidate_against_curated_bundle(
     hits: list[SearchHit] = []
     verification_cache: dict[str, tuple[bool, str]] = {}
     verification_fetch_count = 0
-    hit_count_by_outlet = {snapshot.outlet_key: 0 for snapshot in bundle.outlet_snapshots}
+    hit_count_by_outlet = {
+        snapshot.outlet_key: 0 for snapshot in bundle.outlet_snapshots
+    }
 
     for fetched_document in bundle.fetched_documents:
         verification_fetch_count, _, hit_count = _append_hits_from_entries(
