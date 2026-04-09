@@ -8,7 +8,7 @@ Hermetic design:
 - No network calls, no GPU, no writes to real data directories.
 - build_dim_commune tests write Parquets to pytest's tmp_path fixture (auto-cleaned).
 - Private functions (_normalize_name, _match_incumbent, _apply_tour2_flag) are
-  imported directly — testing private functions from the same package is standard
+  imported directly â€” testing private functions from the same package is standard
   Python practice when the logic is critical and the function is a shared utility.
 """
 
@@ -17,17 +17,31 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from src.config.settings import (
+    SAMPLE_LARGE_TOTAL,
+    SAMPLE_MEDIUM_TOTAL,
+    SAMPLE_SMALL_TOTAL,
+)
 from src.transform._exceptions import DataQualityError
+from src.transform._leader_keys import build_full_name_columns
 from src.transform.dim_candidate import (
     _OUTPUT_COLUMNS,
+    _apply_incumbent_matching,
     _apply_tour2_flag,
+    _build_tour2_leader_set,
     _compute_same_name_candidate_counts,
     _match_incumbent,
     _normalize_list_nuance_code,
     _normalize_name,
+    build_dim_candidate_leader,
 )
 from src.transform.dim_commune import build_dim_commune
 from src.transform.sampling import build_sample
+from tests.sampling_builders import (
+    build_candidate_and_commune_frames,
+    build_candidate_universe_frame,
+    write_parquet_frame,
+)
 
 
 def test_normalize_list_nuance_code_strips_leading_list_prefix():
@@ -44,7 +58,38 @@ def test_normalize_list_nuance_code_strips_leading_list_prefix():
     assert _normalize_list_nuance_code(None) == ""
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+def test_build_full_name_columns_raises_when_name_component_columns_missing():
+    """Regression: full_name construction must fail fast when source columns are absent."""
+    candidate_df = pd.DataFrame(
+        {
+            "commune_insee": ["75056"],
+            "gender": ["F"],
+        }
+    )
+
+    with pytest.raises(
+        ValueError, match="Cannot build full_name without required columns"
+    ):
+        build_full_name_columns(candidate_df)
+
+
+def test_build_full_name_columns_raises_when_name_components_are_blank():
+    """Regression: blank family/given names must not silently collapse to empty full_name."""
+    candidate_df = pd.DataFrame(
+        {
+            "family_name": ["DUPONT", ""],
+            "given_name": ["Alice", "Bob"],
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot build full_name from blank family_name/given_name rows",
+    ):
+        build_full_name_columns(candidate_df)
+
+
+# â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def _write_parquet(df: pd.DataFrame, path) -> None:
@@ -65,22 +110,74 @@ _COG_MAP = {
 }
 _SEATS_MAP = {
     "CODE_COMMUNE": "commune_insee",
-    "LIB_COMMUNE": "commune_name",  # deliberate overlap with COG — exercises the fix
-    "CODE_DPT": "dep_code",  # deliberate overlap with COG — exercises the fix
+    "LIB_COMMUNE": "commune_name",  # deliberate overlap with COG â€” exercises the fix
+    "CODE_DPT": "dep_code",  # deliberate overlap with COG â€” exercises the fix
     "LIB_DPT": "dep_name",
     "POPULATION": "population",
     "NBRE_SAP_COM": "seats_municipal",
     "NBRE_SAP_EPCI": "seats_epci",
 }
+_LARGE_PER_GENDER = SAMPLE_LARGE_TOTAL // 2
+_MEDIUM_PER_GENDER = SAMPLE_MEDIUM_TOTAL // 2
+_SMALL_PER_GENDER = SAMPLE_SMALL_TOTAL // 2
+_CANDIDATE_IDENTITY_MAP = {
+    "full_name": "full_name",
+    "family_name": "family_name",
+    "given_name": "given_name",
+    "gender": "gender",
+    "commune_insee": "commune_insee",
+    "is_list_leader": "is_list_leader",
+    "position_on_list": "position_on_list",
+    "list_nuance": "list_nuance",
+}
+
+
+def _write_dim_candidate_inputs(
+    tmp_path,
+    *,
+    candidate_rows: list[dict[str, object]],
+    dim_commune_rows: list[dict[str, object]] | None = None,
+    rne_rows: list[dict[str, object]] | None = None,
+) -> tuple:
+    """Write the minimum viable inputs needed by build_dim_candidate_leader."""
+    bronze_dir = tmp_path / "bronze"
+    silver_dir = tmp_path / "silver"
+    duckdb_path = tmp_path / "warehouse.duckdb"
+
+    _write_parquet(
+        pd.DataFrame(candidate_rows),
+        bronze_dir / "candidates" / "candidates_tour1.parquet",
+    )
+    _write_parquet(
+        pd.DataFrame(rne_rows or []),
+        bronze_dir / "rne" / "rne_incumbents.parquet",
+    )
+    _write_parquet(
+        pd.DataFrame(
+            dim_commune_rows
+            or [
+                {
+                    "commune_insee": "01001",
+                    "commune_name": "Commune 01001",
+                    "dep_code": "01",
+                    "reg_code": "84",
+                    "population": 12_000,
+                    "city_size_bucket": "small",
+                }
+            ]
+        ),
+        silver_dir / "dim_commune.parquet",
+    )
+    return bronze_dir, silver_dir, duckdb_path
 
 
 @pytest.fixture
 def bronze_commune_parquets(tmp_path):
     """Write minimal COG + seats bronze Parquets to a temp bronze directory.
 
-    The seats fixture deliberately includes LIB_COMMUNE and CODE_DPT — columns
+    The seats fixture deliberately includes LIB_COMMUNE and CODE_DPT â€” columns
     that also exist in COG after rename. This is the exact condition that
-    triggered the commune_name / dep_code → None bug before the fix.
+    triggered the commune_name / dep_code â†’ None bug before the fix.
     """
     cog_df = pd.DataFrame(
         {
@@ -100,9 +197,9 @@ def bronze_commune_parquets(tmp_path):
             "LIB_COMMUNE": [
                 "Paris",
                 "Lyon",
-            ],  # overlaps with COG.LIBELLE → commune_name
-            "CODE_DPT": ["75", "69"],  # overlaps with COG.DEP → dep_code
-            "LIB_DPT": ["Paris dept", "Rhône"],
+            ],  # overlaps with COG.LIBELLE â†’ commune_name
+            "CODE_DPT": ["75", "69"],  # overlaps with COG.DEP â†’ dep_code
+            "LIB_DPT": ["Paris dept", "RhÃ´ne"],
             "POPULATION": ["2161000", "522000"],
             "NBRE_SAP_COM": ["163", "73"],
             "NBRE_SAP_EPCI": ["0", "44"],
@@ -117,7 +214,7 @@ def bronze_commune_parquets(tmp_path):
     return bronze_dir
 
 
-# ── _normalize_name ───────────────────────────────────────────────────────────
+# â”€â”€ _normalize_name â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def test_normalize_name_strips_hyphens():
@@ -153,7 +250,7 @@ def test_normalize_name_strips_accents():
     assert _normalize_name("François") == "FRANCOIS"
 
 
-# ── _match_incumbent ──────────────────────────────────────────────────────────
+# â”€â”€ _match_incumbent â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def test_match_incumbent_hyphenated_name_above_threshold():
@@ -184,7 +281,43 @@ def test_match_incumbent_hyphenated_name_above_threshold():
     assert score is not None and score >= 85
 
 
-# ── _apply_tour2_flag ─────────────────────────────────────────────────────────
+def test_apply_incumbent_matching_preserves_non_contiguous_index_alignment():
+    """Regression: nullable-boolean assignment must align to the leader index.
+
+    After filtering the full candidate table, leader_df keeps the original row
+    index. Assigning a default RangeIndex-backed Series caused pandas to align on
+    mismatched labels, silently converting real True/False values into <NA>.
+    """
+    leader_df = pd.DataFrame(
+        {
+            "commune_insee": ["01001", "01002"],
+            "full_name_normalized": [
+                _normalize_name("Anne-Sophie Martin"),
+                _normalize_name("Louis Durand"),
+            ],
+        },
+        index=[101, 205],
+    )
+    lookup_df = pd.DataFrame(
+        {
+            "commune_insee": ["01001", "01002"],
+            "full_name_normalized": [
+                _normalize_name("Anne Sophie Martin"),
+                _normalize_name("Someone Else"),
+            ],
+            "original_full_name": ["Anne Sophie Martin", "Someone Else"],
+            "rne_mandate_role": ["Maire", "Maire"],
+        }
+    )
+
+    result_df = _apply_incumbent_matching(leader_df, lookup_df)
+
+    assert str(result_df["is_incumbent"].dtype) == "boolean"
+    assert result_df.loc[101, "is_incumbent"] == True  # noqa: E712
+    assert result_df.loc[205, "is_incumbent"] == False  # noqa: E712
+
+
+# â”€â”€ _apply_tour2_flag â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def test_apply_tour2_flag_matches_hyphenated_variant():
@@ -192,7 +325,7 @@ def test_apply_tour2_flag_matches_hyphenated_variant():
 
     _build_tour2_leader_set uses _normalize_name on Tour 2 names.
     _apply_tour2_flag checks (commune, full_name_normalized) set membership.
-    Before the fix, "ANNE-SOPHIE MARTIN" ≠ "ANNE SOPHIE MARTIN" as strings.
+    Before the fix, "ANNE-SOPHIE MARTIN" â‰  "ANNE SOPHIE MARTIN" as strings.
     After the fix, both produce "ANNE SOPHIE MARTIN" and the lookup succeeds.
     """
     # Simulate Tour 2 set as built by _build_tour2_leader_set
@@ -201,7 +334,7 @@ def test_apply_tour2_flag_matches_hyphenated_variant():
     leader_df = pd.DataFrame(
         {
             "commune_insee": ["75056"],
-            # Tour 1 name without hyphen — as built by build_dim_candidate_leader
+            # Tour 1 name without hyphen â€” as built by build_dim_candidate_leader
             "full_name_normalized": [_normalize_name("Anne Sophie Martin")],
         }
     )
@@ -214,29 +347,102 @@ def test_apply_tour2_flag_matches_hyphenated_variant():
     )
 
 
-# ── dim_candidate _OUTPUT_COLUMNS ─────────────────────────────────────────────
+def test_apply_tour2_flag_uses_nullable_boolean_and_preserves_missing_keys():
+    """Boundary: missing commune or name keys must remain NULL, not false.
+
+    The advanced_to_tour2 contract distinguishes "not in Tour 2" from
+    "comparison could not be attempted". Using pandas' nullable boolean dtype
+    preserves that difference while avoiding an object-typed column.
+    """
+    tour2_set = {("75056", _normalize_name("Anne-Sophie Martin"))}
+    leader_df = pd.DataFrame(
+        {
+            "commune_insee": ["75056", "75057", "75058", ""],
+            "full_name_normalized": [
+                _normalize_name("Anne Sophie Martin"),
+                _normalize_name("Marie Durand"),
+                "",
+                _normalize_name("Alice Martin"),
+            ],
+        }
+    )
+
+    result_df = _apply_tour2_flag(leader_df, tour2_set)
+
+    assert str(result_df["advanced_to_tour2"].dtype) == "boolean"
+    assert result_df.loc[0, "advanced_to_tour2"] == True  # noqa: E712
+    assert result_df.loc[1, "advanced_to_tour2"] == False  # noqa: E712
+    assert pd.isna(result_df.loc[2, "advanced_to_tour2"])
+    assert pd.isna(result_df.loc[3, "advanced_to_tour2"])
+
+
+def test_build_tour2_leader_set_deduplicates_and_skips_blank_keys(tmp_path):
+    """Boundary: Tour 2 lookup should keep only valid unique (commune, name) pairs."""
+    tour2_df = pd.DataFrame(
+        {
+            "is_list_leader": ["Oui", "Oui", "Oui", "Oui"],
+            "commune_insee": ["75056", "75056", "75057", ""],
+            "full_name": [
+                "ANNE-SOPHIE MARTIN",
+                "ANNE SOPHIE MARTIN",
+                "",
+                "ALICE MARTIN",
+            ],
+        }
+    )
+    bronze_path = tmp_path / "bronze" / "candidates_tour2.parquet"
+    _write_parquet(tour2_df, bronze_path)
+
+    tour2_set = _build_tour2_leader_set(bronze_path, candidates_column_map={})
+
+    assert tour2_set == {("75056", _normalize_name("ANNE SOPHIE MARTIN"))}
+
+
+# â”€â”€ dim_candidate _OUTPUT_COLUMNS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
 def test_dim_candidate_output_columns_match_data_model():
-    """Regression: _OUTPUT_COLUMNS previously included commune_name, dep_code, population.
+    """Regression: Silver dim_candidate_leader must stay Kimball-clean.
 
-    Per data-model.md §dim_candidate_leader, these three columns are intentionally
-    excluded — they are fully derivable via JOIN dim_commune. Including them caused
-    the merge suffix bug (commune_name became None after join with dim_commune).
-    The denormalised columns required for sampling and regression must still be present.
+    Geography belongs in dim_commune and election outcomes belong in
+    fact_election_result. Keeping those columns out of the candidate dimension
+    prevents early denormalisation and forces the pre-join to happen once in
+    gold.candidate_universe.
     """
-    for forbidden in ("commune_name", "dep_code", "population"):
+    for forbidden in (
+        "commune_name",
+        "dep_code",
+        "population",
+        "reg_code",
+        "city_size_bucket",
+        "score_tour1_votes",
+        "score_tour1_pct_expressed",
+        "score_tour1_rank",
+        "score_tour2_votes",
+        "score_tour2_pct_expressed",
+        "score_tour2_rank",
+        "vote_share_band_tour1",
+        "won_final_round",
+    ):
         assert (
             forbidden not in _OUTPUT_COLUMNS
-        ), f"'{forbidden}' must not be in _OUTPUT_COLUMNS — see data-model.md Gap Analysis"
+        ), f"'{forbidden}' must not be in _OUTPUT_COLUMNS â€” see data-model.md Gap Analysis"
 
-    for required in ("city_size_bucket", "reg_code"):
+    for required in (
+        "commune_insee",
+        "same_name_candidate_count",
+        "list_nuance",
+        "nuance_group",
+        "is_incumbent",
+        "incumbent_match_score",
+        "advanced_to_tour2",
+    ):
         assert (
             required in _OUTPUT_COLUMNS
-        ), f"'{required}' must be in _OUTPUT_COLUMNS — it is a direct regression input"
+        ), f"'{required}' must stay in _OUTPUT_COLUMNS â€” it is a candidate attribute"
 
     assert "same_name_candidate_count" in _OUTPUT_COLUMNS, (
-        "'same_name_candidate_count' must be in _OUTPUT_COLUMNS — "
+        "'same_name_candidate_count' must be in _OUTPUT_COLUMNS â€” "
         "sampling priority depends on this auditable collision metric"
     )
 
@@ -262,7 +468,206 @@ def test_same_name_candidate_count_uses_normalized_full_name():
     assert result_df.loc[2, "same_name_candidate_count"] == 1
 
 
-# ── build_dim_commune ─────────────────────────────────────────────────────────
+def test_same_name_candidate_count_ignores_blank_non_candidate_rows():
+    """Regression: blank raw rows should not fail the ambiguity feature build."""
+    candidate_df = pd.DataFrame(
+        {
+            "family_name": ["Dupont", "", None],
+            "given_name": ["Jean-Luc", " ", None],
+        }
+    )
+
+    result_df = _compute_same_name_candidate_counts(candidate_df)
+
+    assert result_df.loc[0, "same_name_candidate_count"] == 1
+    assert pd.isna(result_df.loc[1, "same_name_candidate_count"])
+    assert pd.isna(result_df.loc[2, "same_name_candidate_count"])
+
+
+# â”€â”€ build_dim_commune â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+
+def test_build_dim_candidate_leader_returns_valid_row(tmp_path):
+    """Happy path: build_dim_candidate_leader should emit a clean one-row dimension."""
+    bronze_dir, silver_dir, duckdb_path = _write_dim_candidate_inputs(
+        tmp_path,
+        candidate_rows=[
+            {
+                "full_name": "DUPONT Alice",
+                "family_name": "DUPONT",
+                "given_name": "Alice",
+                "gender": "F",
+                "commune_insee": "01001",
+                "is_list_leader": "Oui",
+                "position_on_list": "1",
+                "list_nuance": "DVG",
+            }
+        ],
+    )
+
+    result_df = build_dim_candidate_leader(
+        bronze_dir=bronze_dir,
+        silver_dir=silver_dir,
+        duckdb_path=duckdb_path,
+        candidates_column_map=_CANDIDATE_IDENTITY_MAP,
+        rne_column_map={},
+        include_tour2_flag=False,
+    )
+
+    assert len(result_df) == 1
+    assert result_df.loc[0, "nuance_group"] == "gauche"
+    assert "city_size_bucket" not in result_df.columns
+    assert "score_tour1_rank" not in result_df.columns
+    assert str(result_df["advanced_to_tour2"].dtype) == "boolean"
+    assert pd.isna(result_df.loc[0, "advanced_to_tour2"])
+
+
+def test_build_dim_candidate_leader_filters_out_excluded_communes_before_nuance_mapping(
+    tmp_path,
+):
+    """Regression: excluded communes must not fail the build when their nuance is missing."""
+    bronze_dir, silver_dir, duckdb_path = _write_dim_candidate_inputs(
+        tmp_path,
+        candidate_rows=[
+            {
+                "full_name": "DUPONT Alice",
+                "family_name": "DUPONT",
+                "given_name": "Alice",
+                "gender": "F",
+                "commune_insee": "01001",
+                "is_list_leader": "Oui",
+                "position_on_list": "1",
+                "list_nuance": "DVG",
+            },
+            {
+                "full_name": "MARTIN Bob",
+                "family_name": "MARTIN",
+                "given_name": "Bob",
+                "gender": "M",
+                "commune_insee": "01002",
+                "is_list_leader": "Oui",
+                "position_on_list": "1",
+                "list_nuance": None,
+            },
+        ],
+        dim_commune_rows=[
+            {
+                "commune_insee": "01001",
+                "commune_name": "Eligible Commune",
+                "dep_code": "01",
+                "reg_code": "84",
+                "population": 12_000,
+                "city_size_bucket": "small",
+            },
+            {
+                "commune_insee": "01002",
+                "commune_name": "Excluded Commune",
+                "dep_code": "01",
+                "reg_code": "84",
+                "population": 1_200,
+                "city_size_bucket": "excluded",
+            },
+        ],
+    )
+
+    result_df = build_dim_candidate_leader(
+        bronze_dir=bronze_dir,
+        silver_dir=silver_dir,
+        duckdb_path=duckdb_path,
+        candidates_column_map=_CANDIDATE_IDENTITY_MAP,
+        rne_column_map={},
+        include_tour2_flag=False,
+    )
+
+    assert result_df["commune_insee"].tolist() == ["01001"]
+    assert result_df["full_name"].tolist() == ["DUPONT Alice"]
+
+
+def test_build_dim_candidate_leader_raises_when_leader_columns_missing(tmp_path):
+    """Regression: missing leader-identification columns must fail fast."""
+    bronze_dir, silver_dir, duckdb_path = _write_dim_candidate_inputs(
+        tmp_path,
+        candidate_rows=[
+            {
+                "full_name": "DUPONT Alice",
+                "family_name": "DUPONT",
+                "given_name": "Alice",
+                "gender": "F",
+                "commune_insee": "01001",
+                "list_nuance": "DVG",
+            }
+        ],
+    )
+
+    with pytest.raises(
+        DataQualityError,
+        match="neither 'is_list_leader' nor 'position_on_list'",
+    ):
+        build_dim_candidate_leader(
+            bronze_dir=bronze_dir,
+            silver_dir=silver_dir,
+            duckdb_path=duckdb_path,
+            candidates_column_map=_CANDIDATE_IDENTITY_MAP,
+            rne_column_map={},
+            include_tour2_flag=False,
+        )
+
+
+def test_build_dim_candidate_leader_raises_when_list_nuance_missing(tmp_path):
+    """Regression: nuance_group must fail fast when source nuance is absent."""
+    bronze_dir, silver_dir, duckdb_path = _write_dim_candidate_inputs(
+        tmp_path,
+        candidate_rows=[
+            {
+                "full_name": "DUPONT Alice",
+                "family_name": "DUPONT",
+                "given_name": "Alice",
+                "gender": "F",
+                "commune_insee": "01001",
+                "is_list_leader": "Oui",
+                "position_on_list": "1",
+            }
+        ],
+    )
+
+    with pytest.raises(DataQualityError, match="list_nuance column not found"):
+        build_dim_candidate_leader(
+            bronze_dir=bronze_dir,
+            silver_dir=silver_dir,
+            duckdb_path=duckdb_path,
+            candidates_column_map=_CANDIDATE_IDENTITY_MAP,
+            rne_column_map={},
+            include_tour2_flag=False,
+        )
+
+
+def test_build_dim_candidate_leader_raises_when_full_name_is_unusable(tmp_path):
+    """Regression: empty leader names must fail before surrogate-key generation."""
+    bronze_dir, silver_dir, duckdb_path = _write_dim_candidate_inputs(
+        tmp_path,
+        candidate_rows=[
+            {
+                "full_name": "",
+                "family_name": "",
+                "given_name": "",
+                "gender": "F",
+                "commune_insee": "01001",
+                "is_list_leader": "Oui",
+                "position_on_list": "1",
+                "list_nuance": "DVG",
+            }
+        ],
+    )
+
+    with pytest.raises(DataQualityError, match="could not build usable leader names"):
+        build_dim_candidate_leader(
+            bronze_dir=bronze_dir,
+            silver_dir=silver_dir,
+            duckdb_path=duckdb_path,
+            candidates_column_map=_CANDIDATE_IDENTITY_MAP,
+            rne_column_map={},
+            include_tour2_flag=False,
+        )
 
 
 def test_build_dim_commune_commune_name_not_none_after_merge(
@@ -281,7 +686,7 @@ def test_build_dim_commune_commune_name_not_none_after_merge(
         seats_column_map=_SEATS_MAP,
     )
     assert result_df["commune_name"].notna().all(), (
-        "commune_name must not be None after merge — "
+        "commune_name must not be None after merge â€” "
         "COG is authoritative and must not be overridden by seats suffixes"
     )
 
@@ -299,7 +704,7 @@ def test_build_dim_commune_dep_code_not_none_after_merge(
     )
     assert (
         result_df["dep_code"].notna().all()
-    ), "dep_code must not be None — suffix collision with seats was not handled"
+    ), "dep_code must not be None â€” suffix collision with seats was not handled"
 
 
 def test_build_dim_commune_no_suffix_columns_in_output(
@@ -324,7 +729,7 @@ def test_build_dim_commune_raises_on_missing_seats_join_key(
 ):
     """Regression: empty seats_column_map must raise DataQualityError, not silently continue.
 
-    Before the fix, this set city_size_bucket='excluded' for ALL communes —
+    Before the fix, this set city_size_bucket='excluded' for ALL communes â€”
     the pipeline appeared to succeed while all downstream sampling was broken.
     """
     with pytest.raises(DataQualityError, match="seats join failed"):
@@ -333,95 +738,54 @@ def test_build_dim_commune_raises_on_missing_seats_join_key(
             silver_dir=tmp_path / "silver",
             duckdb_path=tmp_path / "warehouse.duckdb",
             cog_column_map=_COG_MAP,
-            seats_column_map={},  # empty map → no rename → commune_insee absent → must fail
+            seats_column_map={},  # empty map â†’ no rename â†’ commune_insee absent â†’ must fail
         )
 
 
-# ── build_sample (gold schema) ────────────────────────────────────────────────
+# â”€â”€ build_sample (gold schema) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-# Region codes: 4 distinct values to satisfy SAMPLE_MIN_REGION_COUNT=4.
-_SAMPLE_REG_CODES = ["11", "84", "44", "24"]
-
-
-def _make_leader_rows(bucket: str, n_per_gender: int, dep_prefix: str) -> list[dict]:
-    """Build the minimum viable candidate rows for one city-size stratum.
-
-    Candidates are assigned cycling reg_codes so the 24-person sample always
-    contains ≥ 4 distinct regions without triggering geographic resampling.
-    INSEE commune codes follow the standard format: 2-digit dep + 3-digit number.
-    """
-    rows = []
-    idx = 0
-    for gender in ["F", "M"]:
-        for _j in range(n_per_gender):
-            commune = f"{dep_prefix}{idx + 1:03d}"
-            rows.append(
-                {
-                    "leader_id": f"{commune}{gender}",
-                    "full_name": f"Leader {commune} {gender}",
-                    "gender": gender,
-                    "commune_insee": commune,
-                    "city_size_bucket": bucket,
-                    "reg_code": _SAMPLE_REG_CODES[idx % len(_SAMPLE_REG_CODES)],
-                    "nuance_group": "divers",
-                    "same_name_candidate_count": 1,
-                    "list_nuance": "LDVC",
-                    "is_incumbent": False,
-                    "incumbent_match_score": 0.0,
-                    "incumbent_match_auditable": True,
-                    "advanced_to_tour2": False,
-                }
-            )
-            idx += 1
-    return rows
+# Region codes cycled globally across the full fixture so the schema tests also
+# satisfy the active region-cap contract.
+_SAMPLE_REG_CODES = [
+    "11",
+    "24",
+    "27",
+    "28",
+    "32",
+    "44",
+    "52",
+    "53",
+    "75",
+    "76",
+    "84",
+    "93",
+    "94",
+]
 
 
 @pytest.fixture
 def silver_parquets_for_sampling(tmp_path):
-    """Write minimal dim_candidate_leader + dim_commune silver Parquets for sampling tests.
+    """Write minimal candidate_universe + dim_commune inputs for sampling tests.
 
-    Constructs exactly the minimum viable pool: 2F+2M large, 4F+4M medium,
-    6F+6M small — matching settings.py quotas exactly. With pool size == quota
-    per stratum, all candidates are selected deterministically, making the
-    test output stable across random seeds.
-
-    Commune codes:
-      large:  75001–75004  (dep 75)
-      medium: 69001–69008  (dep 69)
-      small:  35001–35012  (dep 35)
+    Constructs exactly the minimum viable pool for the active cohort contract:
+    one full stratum quota per bucket with a 50/50 gender split. Because the
+    pool size equals the quota in every bucket, all candidates are selected
+    deterministically and the schema tests stay stable across random seeds.
     """
     silver_dir = tmp_path / "silver"
+    gold_dir = tmp_path / "gold"
     silver_dir.mkdir(parents=True, exist_ok=True)
 
-    leader_rows = (
-        _make_leader_rows("large", 2, "75")
-        + _make_leader_rows("medium", 4, "69")
-        + _make_leader_rows("small", 6, "35")
+    leader_df, commune_df = build_candidate_and_commune_frames(
+        extra_candidates_per_slot=0
     )
-    leader_df = pd.DataFrame(leader_rows)
-    _write_parquet(leader_df, silver_dir / "dim_candidate_leader.parquet")
+    write_parquet_frame(commune_df, silver_dir / "dim_commune.parquet")
+    write_parquet_frame(
+        build_candidate_universe_frame(leader_df, commune_df),
+        gold_dir / "candidate_universe.parquet",
+    )
 
-    # dim_commune: one row per unique commune in the leader pool.
-    # dep_code derived from the first two characters of the INSEE code,
-    # matching the real INSEE encoding convention.
-    population_by_bucket = {"large": 150_000, "medium": 50_000, "small": 10_000}
-    commune_rows = [
-        {
-            "commune_insee": row["commune_insee"],
-            "commune_name": f"Commune {row['commune_insee']}",
-            "dep_code": row["commune_insee"][:2],
-            "reg_code": row["reg_code"],
-            "population": population_by_bucket[row["city_size_bucket"]],
-            "city_size_bucket": row["city_size_bucket"],
-            "seats_municipal": 63,
-            "seats_epci": 44,
-        }
-        for row in leader_rows
-    ]
-    commune_df = pd.DataFrame(commune_rows).drop_duplicates(subset="commune_insee")
-    _write_parquet(commune_df, silver_dir / "dim_commune.parquet")
-
-    return silver_dir
+    return silver_dir, gold_dir
 
 
 def test_build_sample_gold_schema_includes_commune_name(
@@ -433,14 +797,15 @@ def test_build_sample_gold_schema_includes_commune_name(
     not "35238". Without commune_name the news ingest module cannot build
     valid search queries and would return empty or unrelated results.
     """
+    silver_dir, gold_dir = silver_parquets_for_sampling
     result_df = build_sample(
-        silver_dir=silver_parquets_for_sampling,
-        gold_dir=tmp_path / "gold",
+        silver_dir=silver_dir,
+        gold_dir=gold_dir,
         duckdb_path=tmp_path / "warehouse.duckdb",
         random_seed=42,
     )
     assert "commune_name" in result_df.columns, (
-        "gold.sample_leaders must contain commune_name — "
+        "gold.sample_leaders must contain commune_name â€” "
         "GDELT text queries require the human-readable commune label"
     )
 
@@ -454,14 +819,15 @@ def test_build_sample_gold_schema_includes_dep_code(
     dep_code narrows the GDELT search scope to the correct administrative area
     and is also used as a covariate in regression models.
     """
+    silver_dir, gold_dir = silver_parquets_for_sampling
     result_df = build_sample(
-        silver_dir=silver_parquets_for_sampling,
-        gold_dir=tmp_path / "gold",
+        silver_dir=silver_dir,
+        gold_dir=gold_dir,
         duckdb_path=tmp_path / "warehouse.duckdb",
         random_seed=42,
     )
     assert "dep_code" in result_df.columns, (
-        "gold.sample_leaders must contain dep_code — "
+        "gold.sample_leaders must contain dep_code â€” "
         "needed to disambiguate same-name communes in GDELT queries"
     )
 
@@ -473,21 +839,22 @@ def test_build_sample_commune_fields_are_non_null(
 
     A null here means a sampled commune_insee has no match in dim_commune,
     which would silently produce an empty GDELT query string and zero articles
-    for that candidate — corrupting the exposure metric.
+    for that candidate â€” corrupting the exposure metric.
     """
+    silver_dir, gold_dir = silver_parquets_for_sampling
     result_df = build_sample(
-        silver_dir=silver_parquets_for_sampling,
-        gold_dir=tmp_path / "gold",
+        silver_dir=silver_dir,
+        gold_dir=gold_dir,
         duckdb_path=tmp_path / "warehouse.duckdb",
         random_seed=42,
     )
     null_commune_names = result_df["commune_name"].isna().sum()
     null_dep_codes = result_df["dep_code"].isna().sum()
     assert null_commune_names == 0, (
-        f"commune_name has {null_commune_names} null values — "
+        f"commune_name has {null_commune_names} null values â€” "
         "all sampled communes must be present in dim_commune"
     )
     assert null_dep_codes == 0, (
-        f"dep_code has {null_dep_codes} null values — "
+        f"dep_code has {null_dep_codes} null values â€” "
         "all sampled communes must be present in dim_commune"
     )

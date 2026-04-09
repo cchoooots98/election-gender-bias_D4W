@@ -7,6 +7,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+import requests
+
+pytest.importorskip("rapidfuzz")
 
 from src.orchestration import sampling_pipeline
 
@@ -37,6 +40,7 @@ def _stub_ingest(relative_path: str, call_order: list[str], step_name: str):
     """Create an ingest stub that writes a 1-row bronze parquet."""
 
     def _runner(raw_dir, bronze_dir):
+        del raw_dir
         call_order.append(step_name)
         output_path = bronze_dir / relative_path
         _write_parquet(pd.DataFrame({"value": [step_name]}), output_path)
@@ -69,6 +73,37 @@ def _stub_build_dim_commune(call_order: list[str]):
     return _runner
 
 
+def _stub_build_fact_election_result(call_order: list[str]):
+    """Create a fact_election_result stub that writes one silver row."""
+
+    def _runner(bronze_dir, silver_dir, duckdb_path, candidates_column_map=None):
+        del bronze_dir, duckdb_path, candidates_column_map
+        call_order.append("build_fact_election_result")
+        dataframe = pd.DataFrame(
+            {
+                "leader_id": ["leader-001"],
+                "commune_insee": ["00001"],
+                "round_number": [1],
+                "list_id": ["1"],
+                "leader_full_name_official": ["Candidate 1"],
+                "votes": [100],
+                "vote_share_pct_expressed": [55.0],
+                "vote_share_pct_registered": [55.0],
+                "rank_in_commune_round": [1],
+                "seats_municipal_won": [20],
+                "seats_epci_won": [4],
+                "list_nuance": ["DVG"],
+                "_source_url": ["https://example.com/results_tour1.csv"],
+                "_ingested_at": ["2026-04-08T10:00:00+00:00"],
+                "_source_hash": ["a" * 32],
+            }
+        )
+        _write_parquet(dataframe, silver_dir / "fact_election_result.parquet")
+        return dataframe
+
+    return _runner
+
+
 def _stub_build_dim_candidate(call_order: list[str]):
     """Create a dim_candidate_leader stub that writes one silver row."""
 
@@ -89,8 +124,6 @@ def _stub_build_dim_candidate(call_order: list[str]):
                 "full_name": ["Candidate 1"],
                 "gender": ["F"],
                 "commune_insee": ["00001"],
-                "reg_code": ["11"],
-                "city_size_bucket": ["large"],
                 "same_name_candidate_count": [1],
                 "list_nuance": ["DVG"],
                 "nuance_group": ["gauche"],
@@ -101,6 +134,46 @@ def _stub_build_dim_candidate(call_order: list[str]):
             }
         )
         _write_parquet(dataframe, silver_dir / "dim_candidate_leader.parquet")
+        return dataframe
+
+    return _runner
+
+
+def _stub_build_candidate_universe(call_order: list[str]):
+    """Create a candidate_universe stub that writes one Gold wide row."""
+
+    def _runner(silver_dir, gold_dir, duckdb_path):  # noqa: ARG001
+        del silver_dir, duckdb_path
+        call_order.append("build_candidate_universe")
+        dataframe = pd.DataFrame(
+            {
+                "leader_id": ["leader-001"],
+                "full_name": ["Candidate 1"],
+                "gender": ["F"],
+                "commune_insee": ["00001"],
+                "commune_name": ["Paris"],
+                "dep_code": ["75"],
+                "reg_code": ["11"],
+                "city_size_bucket": ["large"],
+                "same_name_candidate_count": [1],
+                "list_nuance": ["DVG"],
+                "nuance_group": ["gauche"],
+                "is_incumbent": [False],
+                "incumbent_match_score": [None],
+                "incumbent_match_auditable": [False],
+                "advanced_to_tour2": [None],
+                "score_tour1_votes": [100],
+                "score_tour1_pct_expressed": [55.0],
+                "score_tour1_rank": [1],
+                "score_tour2_votes": [None],
+                "score_tour2_pct_expressed": [None],
+                "score_tour2_rank": [None],
+                "vote_share_band_tour1": ["50+"],
+                "won_final_round": [True],
+                "is_viable": [True],
+            }
+        )
+        _write_parquet(dataframe, gold_dir / "candidate_universe.parquet")
         return dataframe
 
     return _runner
@@ -133,6 +206,14 @@ def _stub_build_sample(call_order: list[str]):
                 "incumbent_match_score": [None],
                 "incumbent_match_auditable": [False],
                 "advanced_to_tour2": [None],
+                "score_tour1_votes": [100],
+                "score_tour1_pct_expressed": [55.0],
+                "score_tour1_rank": [1],
+                "score_tour2_votes": [None],
+                "score_tour2_pct_expressed": [None],
+                "score_tour2_rank": [None],
+                "vote_share_band_tour1": ["50+"],
+                "won_final_round": [True],
             }
         )
         _write_parquet(dataframe, gold_dir / "sample_leaders.parquet")
@@ -179,6 +260,13 @@ def test_sampling_pipeline_happy_path_runs_steps_in_order(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         sampling_pipeline,
+        "ingest_results_tour1",
+        _stub_ingest(
+            "results/results_tour1.parquet", call_order, "ingest_results_tour1"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
         "ingest_candidates_tour2",
         _stub_ingest(
             "candidates/candidates_tour2.parquet",
@@ -188,13 +276,30 @@ def test_sampling_pipeline_happy_path_runs_steps_in_order(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         sampling_pipeline,
+        "ingest_results_tour2",
+        _stub_ingest(
+            "results/results_tour2.parquet", call_order, "ingest_results_tour2"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
         "build_dim_commune",
         _stub_build_dim_commune(call_order),
     )
     monkeypatch.setattr(
         sampling_pipeline,
+        "build_fact_election_result",
+        _stub_build_fact_election_result(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
         "build_dim_candidate_leader",
         _stub_build_dim_candidate(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "build_candidate_universe",
+        _stub_build_candidate_universe(call_order),
     )
     monkeypatch.setattr(
         sampling_pipeline,
@@ -215,9 +320,13 @@ def test_sampling_pipeline_happy_path_runs_steps_in_order(tmp_path, monkeypatch)
         "ingest_seats_population",
         "ingest_candidates",
         "ingest_incumbents",
+        "ingest_results_tour1",
         "ingest_candidates_tour2",
+        "ingest_results_tour2",
         "build_dim_commune",
+        "build_fact_election_result",
         "build_dim_candidate_leader",
+        "build_candidate_universe",
         "build_sample",
     ]
     assert result.status == "success"
@@ -226,12 +335,14 @@ def test_sampling_pipeline_happy_path_runs_steps_in_order(tmp_path, monkeypatch)
     assert meta_run is not None
     assert meta_run[1] == "success"
     artifact_paths = json.loads(meta_run[4])
+    assert str(tmp_path / "silver" / "fact_election_result.parquet") in artifact_paths
+    assert str(tmp_path / "gold" / "candidate_universe.parquet") in artifact_paths
     assert str(tmp_path / "gold" / "sample_leaders.parquet") in artifact_paths
     assert str(tmp_path / "gold" / "sample_manifest.json") in artifact_paths
 
 
 def test_sampling_pipeline_optional_tour2_failure_is_partial(tmp_path, monkeypatch):
-    """Boundary: Tour 2 failure must not stop the runnable sampling slice."""
+    """Boundary: optional Tour-2 inputs must not stop the runnable sampling slice."""
     call_order: list[str] = []
     duckdb_path = tmp_path / "warehouse.duckdb"
 
@@ -263,9 +374,23 @@ def test_sampling_pipeline_optional_tour2_failure_is_partial(tmp_path, monkeypat
     )
     monkeypatch.setattr(
         sampling_pipeline,
+        "ingest_results_tour1",
+        _stub_ingest(
+            "results/results_tour1.parquet", call_order, "ingest_results_tour1"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
         "ingest_candidates_tour2",
         lambda raw_dir, bronze_dir: (_ for _ in ()).throw(
             ValueError("tour2 unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_results_tour2",
+        lambda raw_dir, bronze_dir: (_ for _ in ()).throw(
+            ValueError("tour2 results unavailable")
         ),
     )
     monkeypatch.setattr(
@@ -275,8 +400,18 @@ def test_sampling_pipeline_optional_tour2_failure_is_partial(tmp_path, monkeypat
     )
     monkeypatch.setattr(
         sampling_pipeline,
+        "build_fact_election_result",
+        _stub_build_fact_election_result(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
         "build_dim_candidate_leader",
         _stub_build_dim_candidate(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "build_candidate_universe",
+        _stub_build_candidate_universe(call_order),
     )
     monkeypatch.setattr(
         sampling_pipeline,
@@ -293,10 +428,119 @@ def test_sampling_pipeline_optional_tour2_failure_is_partial(tmp_path, monkeypat
     )
 
     assert result.status == "partial"
+    assert call_order == [
+        "ingest_geography",
+        "ingest_seats_population",
+        "ingest_candidates",
+        "ingest_incumbents",
+        "ingest_results_tour1",
+        "build_dim_commune",
+        "build_fact_election_result",
+        "build_dim_candidate_leader",
+        "build_candidate_universe",
+        "build_sample",
+    ]
     meta_run = _read_latest_meta_run(duckdb_path)
     assert meta_run is not None
     assert meta_run[1] == "partial"
+    assert meta_run[3] == 2
+
+
+def test_sampling_pipeline_retryable_optional_tour2_failure_bubbles_for_retry(
+    tmp_path, monkeypatch
+):
+    """Regression: transient Tour 2 download failures must raise for scheduler retry."""
+    call_order: list[str] = []
+    duckdb_path = tmp_path / "warehouse.duckdb"
+
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_geography",
+        _stub_ingest("geography/cog_communes.parquet", call_order, "ingest_geography"),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_seats_population",
+        _stub_ingest(
+            "seats/seats_population.parquet", call_order, "ingest_seats_population"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_candidates",
+        _stub_ingest(
+            "candidates/candidates_tour1.parquet",
+            call_order,
+            "ingest_candidates",
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_incumbents",
+        _stub_ingest("rne/rne_incumbents.parquet", call_order, "ingest_incumbents"),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_results_tour1",
+        _stub_ingest(
+            "results/results_tour1.parquet", call_order, "ingest_results_tour1"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_candidates_tour2",
+        lambda raw_dir, bronze_dir: (_ for _ in ()).throw(
+            requests.Timeout("temporary network failure")
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "ingest_results_tour2",
+        _stub_ingest(
+            "results/results_tour2.parquet", call_order, "ingest_results_tour2"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "build_dim_commune",
+        _stub_build_dim_commune(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "build_fact_election_result",
+        _stub_build_fact_election_result(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "build_dim_candidate_leader",
+        _stub_build_dim_candidate(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "build_sample",
+        _stub_build_sample(call_order),
+    )
+
+    with pytest.raises(requests.Timeout, match="temporary network failure"):
+        sampling_pipeline.run_sampling_pipeline(
+            raw_dir=tmp_path / "raw",
+            bronze_dir=tmp_path / "bronze",
+            silver_dir=tmp_path / "silver",
+            gold_dir=tmp_path / "gold",
+            duckdb_path=duckdb_path,
+        )
+
+    meta_run = _read_latest_meta_run(duckdb_path)
+    assert meta_run is not None
+    assert meta_run[1] == "failed"
     assert meta_run[3] == 1
+    assert call_order == [
+        "ingest_geography",
+        "ingest_seats_population",
+        "ingest_candidates",
+        "ingest_incumbents",
+        "ingest_results_tour1",
+    ]
 
 
 def test_sampling_pipeline_required_failure_marks_meta_run_failed(
@@ -334,6 +578,13 @@ def test_sampling_pipeline_required_failure_marks_meta_run_failed(
     )
     monkeypatch.setattr(
         sampling_pipeline,
+        "ingest_results_tour1",
+        _stub_ingest(
+            "results/results_tour1.parquet", call_order, "ingest_results_tour1"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
         "ingest_candidates_tour2",
         _stub_ingest(
             "candidates/candidates_tour2.parquet",
@@ -343,8 +594,20 @@ def test_sampling_pipeline_required_failure_marks_meta_run_failed(
     )
     monkeypatch.setattr(
         sampling_pipeline,
+        "ingest_results_tour2",
+        _stub_ingest(
+            "results/results_tour2.parquet", call_order, "ingest_results_tour2"
+        ),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
         "build_dim_commune",
         _stub_build_dim_commune(call_order),
+    )
+    monkeypatch.setattr(
+        sampling_pipeline,
+        "build_fact_election_result",
+        _stub_build_fact_election_result(call_order),
     )
 
     def _raise_failure(
