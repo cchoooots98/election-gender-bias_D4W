@@ -4,20 +4,13 @@ import json
 
 import duckdb
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 import requests
 
 pytest.importorskip("rapidfuzz")
 
 from src.orchestration import sampling_pipeline
-
-
-def _write_parquet(dataframe: pd.DataFrame, path) -> None:
-    """Write a DataFrame to Parquet for pipeline test doubles."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pandas(dataframe), path, compression="snappy")
+from tests.sampling_builders import write_parquet_frame
 
 
 def _read_latest_meta_run(duckdb_path):
@@ -43,7 +36,7 @@ def _stub_ingest(relative_path: str, call_order: list[str], step_name: str):
         del raw_dir
         call_order.append(step_name)
         output_path = bronze_dir / relative_path
-        _write_parquet(pd.DataFrame({"value": [step_name]}), output_path)
+        write_parquet_frame(pd.DataFrame({"value": [step_name]}), output_path)
         return output_path
 
     return _runner
@@ -67,7 +60,7 @@ def _stub_build_dim_commune(call_order: list[str]):
                 "city_size_bucket": ["large"],
             }
         )
-        _write_parquet(dataframe, silver_dir / "dim_commune.parquet")
+        write_parquet_frame(dataframe, silver_dir / "dim_commune.parquet")
         return dataframe
 
     return _runner
@@ -98,7 +91,7 @@ def _stub_build_fact_election_result(call_order: list[str]):
                 "_source_hash": ["a" * 32],
             }
         )
-        _write_parquet(dataframe, silver_dir / "fact_election_result.parquet")
+        write_parquet_frame(dataframe, silver_dir / "fact_election_result.parquet")
         return dataframe
 
     return _runner
@@ -133,7 +126,7 @@ def _stub_build_dim_candidate(call_order: list[str]):
                 "advanced_to_tour2": [None],
             }
         )
-        _write_parquet(dataframe, silver_dir / "dim_candidate_leader.parquet")
+        write_parquet_frame(dataframe, silver_dir / "dim_candidate_leader.parquet")
         return dataframe
 
     return _runner
@@ -173,7 +166,7 @@ def _stub_build_candidate_universe(call_order: list[str]):
                 "is_viable": [True],
             }
         )
-        _write_parquet(dataframe, gold_dir / "candidate_universe.parquet")
+        write_parquet_frame(dataframe, gold_dir / "candidate_universe.parquet")
         return dataframe
 
     return _runner
@@ -216,7 +209,7 @@ def _stub_build_sample(call_order: list[str]):
                 "won_final_round": [True],
             }
         )
-        _write_parquet(dataframe, gold_dir / "sample_leaders.parquet")
+        write_parquet_frame(dataframe, gold_dir / "sample_leaders.parquet")
         gold_dir.mkdir(parents=True, exist_ok=True)
         with open(
             gold_dir / "sample_manifest.json", "w", encoding="utf-8"

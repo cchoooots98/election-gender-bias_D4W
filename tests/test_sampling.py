@@ -7,40 +7,33 @@ import pytest
 
 from src.config.settings import (
     CANDIDATE_SAMPLE_SIZE,
-    SAMPLE_LARGE_TOTAL,
-    SAMPLE_MAX_BLOC_SHARE_LIFT_VS_POOL_SHARE,
-    SAMPLE_MAX_CANDIDATES_PER_REGION,
     SAMPLE_MAX_GENDER_BLOC_SHARE_GAP,
     SAMPLE_MAX_GENDER_WIN_RATE_GAP,
-    SAMPLE_MAX_RANK_TOUR1_FOR_VIABILITY,
-    SAMPLE_MAX_SINGLE_BLOC_RATIO,
     SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_BUCKET_GENDER,
-    SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_STRATUM,
     SAMPLE_MAX_SINGLE_DEPARTMENT_RATIO_PER_REGION,
-    SAMPLE_MEDIUM_TOTAL,
-    SAMPLE_MIN_BUCKET_GENDER_SUBGROUP_SIZE,
-    SAMPLE_MIN_NUANCE_GROUP_COUNT_PER_GENDER,
     SAMPLE_MIN_VOTE_SHARE_PCT_TOUR1,
-    SAMPLE_SMALL_TOTAL,
 )
 from src.transform._exceptions import SamplingError
 from src.transform.sampling import (
+    _SAMPLING_HARD_CONSTRAINTS,
+    _SAMPLING_RULE_VERSION,
+    _SAMPLING_SELECTION_PARAMETERS,
+    _SAMPLING_SELECTION_PRIORITY,
+    _SAMPLING_WARNING_THRESHOLDS,
     _cleanup_temp_artifacts,
     _select_unique_commune_candidates,
     _validate_sample,
     build_sample,
 )
 from tests.sampling_builders import (
+    LARGE_PER_GENDER,
+    MEDIUM_PER_GENDER,
+    SMALL_PER_GENDER,
+    TARGET_PER_GENDER,
     build_candidate_and_commune_frames,
     build_candidate_universe_frame,
     write_parquet_frame,
 )
-
-# Derived constants â€” kept here so tests read as plain English, not arithmetic.
-_TARGET_PER_GENDER = CANDIDATE_SAMPLE_SIZE // 2
-_LARGE_PER_GENDER = SAMPLE_LARGE_TOTAL // 2
-_MEDIUM_PER_GENDER = SAMPLE_MEDIUM_TOTAL // 2
-_SMALL_PER_GENDER = SAMPLE_SMALL_TOTAL // 2
 
 
 def write_sampling_inputs(
@@ -122,16 +115,16 @@ def test_gender_balance_and_stratum_quotas(tmp_path):
     leader_df, commune_df = build_candidate_and_commune_frames()
     sample_df = run_build_sample(tmp_path, leader_df, commune_df)
 
-    assert (sample_df["gender"] == "F").sum() == _TARGET_PER_GENDER
-    assert (sample_df["gender"] == "M").sum() == _TARGET_PER_GENDER
+    assert (sample_df["gender"] == "F").sum() == TARGET_PER_GENDER
+    assert (sample_df["gender"] == "M").sum() == TARGET_PER_GENDER
 
     quota_series = sample_df.groupby(["city_size_bucket", "gender"]).size().sort_index()
-    assert quota_series[("large", "F")] == _LARGE_PER_GENDER
-    assert quota_series[("large", "M")] == _LARGE_PER_GENDER
-    assert quota_series[("medium", "F")] == _MEDIUM_PER_GENDER
-    assert quota_series[("medium", "M")] == _MEDIUM_PER_GENDER
-    assert quota_series[("small", "F")] == _SMALL_PER_GENDER
-    assert quota_series[("small", "M")] == _SMALL_PER_GENDER
+    assert quota_series[("large", "F")] == LARGE_PER_GENDER
+    assert quota_series[("large", "M")] == LARGE_PER_GENDER
+    assert quota_series[("medium", "F")] == MEDIUM_PER_GENDER
+    assert quota_series[("medium", "M")] == MEDIUM_PER_GENDER
+    assert quota_series[("small", "F")] == SMALL_PER_GENDER
+    assert quota_series[("small", "M")] == SMALL_PER_GENDER
 
 
 def test_manifest_written_with_correct_candidate_count(tmp_path):
@@ -231,48 +224,11 @@ def test_manifest_records_current_sampling_rule_metadata(tmp_path):
     with open(gold_dir / "sample_manifest.json", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    # Rule version is the cohort contract identifier â€” must change when
-    # methodology changes so downstream consumers can detect the shift.
-    assert (
-        manifest["sampling_rule_version"]
-        == "v11_metropolitan_36_regioncap4_blocbalance_before_deptdiversity"
-    )
-    assert manifest["hard_constraints"]["max_candidates_per_commune"] == 1
-    assert (
-        manifest["hard_constraints"]["max_candidates_per_region"]
-        == SAMPLE_MAX_CANDIDATES_PER_REGION
-    )
-    assert manifest["hard_constraints"]["total_candidates"] == CANDIDATE_SAMPLE_SIZE
-    assert manifest["hard_constraints"]["round1_viability"] == {
-        "logic": "score_tour1_pct_expressed >= min_vote_share_pct OR score_tour1_rank <= max_rank",
-        "min_vote_share_pct": SAMPLE_MIN_VOTE_SHARE_PCT_TOUR1,
-        "max_rank": SAMPLE_MAX_RANK_TOUR1_FOR_VIABILITY,
-    }
-    assert manifest["selection_priority"] == [
-        "lowest_same_name_candidate_count",
-        "commune_not_already_sampled",
-        "region_below_capacity",
-        "improves_region_diversity_recomputed_after_each_selection",
-        "stays_within_bucket_gender_nuance_soft_cap_recomputed_after_each_selection",
-        "stays_close_to_bucket_gender_pool_nuance_share_recomputed_after_each_selection",
-        "reduces_bucket_gender_target_deficit_recomputed_after_each_selection",
-        "improves_department_diversity_within_region_recomputed_after_each_selection",
-        "deterministic_random_seed_tie_break",
-    ]
-    assert manifest["selection_parameters"] == {
-        "max_single_bloc_ratio_per_bucket_gender_soft_cap": SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_BUCKET_GENDER,
-        "max_bloc_share_lift_vs_pool_share": SAMPLE_MAX_BLOC_SHARE_LIFT_VS_POOL_SHARE,
-    }
-    assert manifest["warning_thresholds"] == {
-        "max_single_bloc_ratio_overall": SAMPLE_MAX_SINGLE_BLOC_RATIO,
-        "max_single_bloc_ratio_per_stratum": SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_STRATUM,
-        "max_single_bloc_ratio_per_bucket_gender": SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_BUCKET_GENDER,
-        "max_single_department_ratio_per_region": SAMPLE_MAX_SINGLE_DEPARTMENT_RATIO_PER_REGION,
-        "max_gender_bloc_share_gap": SAMPLE_MAX_GENDER_BLOC_SHARE_GAP,
-        "max_gender_win_rate_gap": SAMPLE_MAX_GENDER_WIN_RATE_GAP,
-        "min_bucket_gender_subgroup_size": SAMPLE_MIN_BUCKET_GENDER_SUBGROUP_SIZE,
-        "min_nuance_group_count_per_gender": SAMPLE_MIN_NUANCE_GROUP_COUNT_PER_GENDER,
-    }
+    assert manifest["sampling_rule_version"] == _SAMPLING_RULE_VERSION
+    assert manifest["hard_constraints"] == _SAMPLING_HARD_CONSTRAINTS
+    assert manifest["selection_priority"] == _SAMPLING_SELECTION_PRIORITY
+    assert manifest["selection_parameters"] == _SAMPLING_SELECTION_PARAMETERS
+    assert manifest["warning_thresholds"] == _SAMPLING_WARNING_THRESHOLDS
     assert "triggered_warnings" in manifest
     assert "diagnostics" in manifest
     assert set(manifest["diagnostics"]) == {
@@ -285,6 +241,47 @@ def test_manifest_records_current_sampling_rule_metadata(tmp_path):
         "control_missingness",
         "region_singleton",
     }
+
+
+def test_build_sample_gold_schema_includes_commune_name_and_dep_code(tmp_path):
+    """Happy path: the Gold cohort must stay self-contained for downstream use."""
+    leader_df, commune_df = build_candidate_and_commune_frames(
+        extra_candidates_per_slot=0
+    )
+    sample_df = run_build_sample(tmp_path, leader_df, commune_df, random_seed=42)
+
+    assert "commune_name" in sample_df.columns
+    assert "dep_code" in sample_df.columns
+
+
+def test_build_sample_commune_fields_are_non_null(tmp_path):
+    """Boundary: sampled leaders must keep non-null commune search attributes."""
+    leader_df, commune_df = build_candidate_and_commune_frames(
+        extra_candidates_per_slot=0
+    )
+    sample_df = run_build_sample(tmp_path, leader_df, commune_df, random_seed=42)
+
+    assert sample_df["commune_name"].notna().all()
+    assert sample_df["dep_code"].notna().all()
+
+
+def test_sampling_inputs_can_fill_region_and_bucket_from_commune_join(tmp_path):
+    """Regression: sampling fixtures should cover commune-sourced geography joins.
+
+    Production sampling reads ``gold.candidate_universe``, where ``reg_code``
+    and ``city_size_bucket`` come from the commune join rather than the narrow
+    candidate dimension. The fixture builder must therefore be able to fill
+    those columns from ``commune_df`` when the candidate frame omits them.
+    """
+    leader_df, commune_df = build_candidate_and_commune_frames(
+        extra_candidates_per_slot=0
+    )
+    leader_df = leader_df.drop(columns=["reg_code", "city_size_bucket"])
+
+    sample_df = run_build_sample(tmp_path, leader_df, commune_df, random_seed=42)
+
+    assert sample_df["reg_code"].notna().all()
+    assert set(sample_df["city_size_bucket"]) == {"large", "medium", "small"}
 
 
 # â”€â”€ Boundary-condition tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

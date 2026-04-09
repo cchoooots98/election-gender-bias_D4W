@@ -1,20 +1,11 @@
 """Tests for the Gold candidate_universe mart."""
 
-from pathlib import Path
-
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from src.transform._exceptions import DataQualityError
 from src.transform.candidate_universe import build_candidate_universe
-
-
-def _write_parquet(dataframe: pd.DataFrame, path: Path) -> None:
-    """Write a DataFrame to a temporary Parquet path."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pandas(dataframe), path, compression="snappy")
+from tests.sampling_builders import write_parquet_frame
 
 
 def test_build_candidate_universe_joins_geography_scores_and_viability(tmp_path):
@@ -58,9 +49,9 @@ def test_build_candidate_universe_joins_geography_scores_and_viability(tmp_path)
         }
     )
 
-    _write_parquet(candidate_df, silver_dir / "dim_candidate_leader.parquet")
-    _write_parquet(commune_df, silver_dir / "dim_commune.parquet")
-    _write_parquet(fact_df, silver_dir / "fact_election_result.parquet")
+    write_parquet_frame(candidate_df, silver_dir / "dim_candidate_leader.parquet")
+    write_parquet_frame(commune_df, silver_dir / "dim_commune.parquet")
+    write_parquet_frame(fact_df, silver_dir / "fact_election_result.parquet")
 
     candidate_universe_df = build_candidate_universe(
         silver_dir=silver_dir,
@@ -107,8 +98,8 @@ def test_build_candidate_universe_raises_when_fact_file_missing(tmp_path):
         }
     )
 
-    _write_parquet(candidate_df, silver_dir / "dim_candidate_leader.parquet")
-    _write_parquet(commune_df, silver_dir / "dim_commune.parquet")
+    write_parquet_frame(candidate_df, silver_dir / "dim_candidate_leader.parquet")
+    write_parquet_frame(commune_df, silver_dir / "dim_commune.parquet")
 
     with pytest.raises(FileNotFoundError, match="fact_election_result"):
         build_candidate_universe(
@@ -158,9 +149,9 @@ def test_build_candidate_universe_fails_when_round1_scores_missing(tmp_path):
         }
     )
 
-    _write_parquet(candidate_df, silver_dir / "dim_candidate_leader.parquet")
-    _write_parquet(commune_df, silver_dir / "dim_commune.parquet")
-    _write_parquet(fact_df, silver_dir / "fact_election_result.parquet")
+    write_parquet_frame(candidate_df, silver_dir / "dim_candidate_leader.parquet")
+    write_parquet_frame(commune_df, silver_dir / "dim_commune.parquet")
+    write_parquet_frame(fact_df, silver_dir / "fact_election_result.parquet")
 
     with pytest.raises(DataQualityError, match="missing round-1 result fields"):
         build_candidate_universe(
@@ -219,9 +210,9 @@ def test_build_candidate_universe_fails_when_dim_candidate_has_stale_wide_column
         }
     )
 
-    _write_parquet(candidate_df, silver_dir / "dim_candidate_leader.parquet")
-    _write_parquet(commune_df, silver_dir / "dim_commune.parquet")
-    _write_parquet(fact_df, silver_dir / "fact_election_result.parquet")
+    write_parquet_frame(candidate_df, silver_dir / "dim_candidate_leader.parquet")
+    write_parquet_frame(commune_df, silver_dir / "dim_commune.parquet")
+    write_parquet_frame(fact_df, silver_dir / "fact_election_result.parquet")
 
     with pytest.raises(DataQualityError, match="stale denormalized columns"):
         build_candidate_universe(

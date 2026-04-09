@@ -1,21 +1,12 @@
 """Tests for the normalized municipal election-results fact table."""
 
-from pathlib import Path
-
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 from src.transform.fact_election_result import (
     build_fact_election_result,
     summarize_election_results,
 )
-
-
-def _write_parquet(dataframe: pd.DataFrame, path: Path) -> None:
-    """Write a DataFrame to Parquet for a temporary test warehouse."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pq.write_table(pa.Table.from_pandas(dataframe), path, compression="snappy")
+from tests.sampling_builders import write_parquet_frame
 
 
 def _candidate_rows(commune_insee: str) -> list[dict[str, object]]:
@@ -96,11 +87,11 @@ def test_build_fact_election_result_normalizes_rounds_and_summary(tmp_path):
     silver_dir = tmp_path / "silver"
     duckdb_path = tmp_path / "warehouse.duckdb"
 
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame(_candidate_rows("11111")),
         bronze_dir / "candidates" / "candidates_tour1.parquet",
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame(
             [
                 {
@@ -114,11 +105,11 @@ def test_build_fact_election_result_normalizes_rounds_and_summary(tmp_path):
         ),
         bronze_dir / "candidates" / "candidates_tour2.parquet",
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame([_results_round1_row("11111")]),
         bronze_dir / "results" / "results_tour1.parquet",
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame([_results_round2_row("11111", "Martin", "Alice")]),
         bronze_dir / "results" / "results_tour2.parquet",
     )
@@ -162,11 +153,11 @@ def test_build_fact_election_result_ignores_blank_non_leader_candidate_rows(tmp_
             "is_list_leader": None,
         }
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame(candidate_rows),
         bronze_dir / "candidates" / "candidates_tour1.parquet",
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame([_results_round1_row("11111")]),
         bronze_dir / "results" / "results_tour1.parquet",
     )
@@ -187,14 +178,14 @@ def test_build_fact_election_result_rejects_name_mismatch(tmp_path):
     silver_dir = tmp_path / "silver"
     duckdb_path = tmp_path / "warehouse.duckdb"
 
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame(_candidate_rows("22222")),
         bronze_dir / "candidates" / "candidates_tour1.parquet",
     )
     mismatch_row = _results_round1_row("22222")
     mismatch_row["Nom candidat 1"] = "Wrong"
     mismatch_row["Prénom candidat 1"] = "Person"
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame([mismatch_row]),
         bronze_dir / "results" / "results_tour1.parquet",
     )
@@ -204,9 +195,9 @@ def test_build_fact_election_result_rejects_name_mismatch(tmp_path):
         silver_dir=silver_dir,
         duckdb_path=duckdb_path,
     )
-    rejected_df = pq.read_table(
+    rejected_df = pd.read_parquet(
         silver_dir / "_rejected" / "fact_election_result_rejected.parquet"
-    ).to_pandas()
+    )
 
     assert len(fact_df) == 1
     assert "round1_leader_name_mismatch" in rejected_df["_rejection_reason"].tolist()
@@ -220,7 +211,7 @@ def test_build_fact_election_result_quarantines_round2_leader_missing_from_tour1
     silver_dir = tmp_path / "silver"
     duckdb_path = tmp_path / "warehouse.duckdb"
 
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame(
             [
                 {
@@ -234,7 +225,7 @@ def test_build_fact_election_result_quarantines_round2_leader_missing_from_tour1
         ),
         bronze_dir / "candidates" / "candidates_tour1.parquet",
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame(
             [
                 {
@@ -248,11 +239,11 @@ def test_build_fact_election_result_quarantines_round2_leader_missing_from_tour1
         ),
         bronze_dir / "candidates" / "candidates_tour2.parquet",
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame([_results_round1_row("33333")]),
         bronze_dir / "results" / "results_tour1.parquet",
     )
-    _write_parquet(
+    write_parquet_frame(
         pd.DataFrame([_results_round2_row("33333", "Lefevre", "Chloe")]),
         bronze_dir / "results" / "results_tour2.parquet",
     )
@@ -262,9 +253,9 @@ def test_build_fact_election_result_quarantines_round2_leader_missing_from_tour1
         silver_dir=silver_dir,
         duckdb_path=duckdb_path,
     )
-    rejected_df = pq.read_table(
+    rejected_df = pd.read_parquet(
         silver_dir / "_rejected" / "fact_election_result_rejected.parquet"
-    ).to_pandas()
+    )
 
     assert (fact_df["round_number"] == 2).sum() == 0
     assert (
