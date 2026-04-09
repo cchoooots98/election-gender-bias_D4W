@@ -59,6 +59,21 @@ CREATE TABLE IF NOT EXISTS meta.meta_run (
 )
 """
 
+_CREATE_NEWS_IMPORT_BATCH_TABLE = """
+CREATE TABLE IF NOT EXISTS meta.meta_news_import_batch (
+    batch_id               VARCHAR     PRIMARY KEY,
+    source_system          VARCHAR     NOT NULL,
+    accepted_record_count  INTEGER     NOT NULL,
+    rejected_record_count  INTEGER     NOT NULL,
+    parser_mix             VARCHAR     NOT NULL,
+    coverage_start         DATE        NOT NULL,
+    coverage_end           DATE        NOT NULL,
+    language_mix           VARCHAR     NOT NULL,
+    operator               VARCHAR     NOT NULL,
+    logged_at              TIMESTAMPTZ NOT NULL
+)
+"""
+
 
 def _import_duckdb():
     """Import DuckDB lazily so modules remain importable in thin environments."""
@@ -100,6 +115,7 @@ def _ensure_meta_tables(conn: Any) -> None:
     conn.execute(_CREATE_META_SCHEMA)
     conn.execute(_CREATE_SOURCE_SNAPSHOT_TABLE)
     conn.execute(_CREATE_RUN_TABLE)
+    conn.execute(_CREATE_NEWS_IMPORT_BATCH_TABLE)
 
 
 def log_source_snapshot(
@@ -292,3 +308,61 @@ def log_pipeline_run(
         conn.close()
 
     return run_id
+
+
+def log_news_import_batch(
+    *,
+    batch_id: str,
+    source_system: str,
+    accepted_record_count: int,
+    rejected_record_count: int,
+    parser_mix: dict[str, int],
+    coverage_start: str,
+    coverage_end: str,
+    language_mix: dict[str, int],
+    operator: str,
+    duckdb_path: Path = WAREHOUSE_PATH,
+) -> str:
+    """Record one news import batch to ``meta.meta_news_import_batch``."""
+    duckdb = _import_duckdb()
+    duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = duckdb.connect(str(duckdb_path))
+    logged_at = datetime.now(UTC)
+
+    try:
+        _ensure_meta_tables(conn)
+        conn.execute(
+            "DELETE FROM meta.meta_news_import_batch WHERE batch_id = ?",
+            [batch_id],
+        )
+        conn.execute(
+            """
+            INSERT INTO meta.meta_news_import_batch
+                (batch_id, source_system, accepted_record_count, rejected_record_count,
+                 parser_mix, coverage_start, coverage_end, language_mix, operator, logged_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                batch_id,
+                source_system,
+                accepted_record_count,
+                rejected_record_count,
+                json.dumps(parser_mix, ensure_ascii=False, sort_keys=True),
+                coverage_start,
+                coverage_end,
+                json.dumps(language_mix, ensure_ascii=False, sort_keys=True),
+                operator,
+                logged_at,
+            ],
+        )
+        logger.info(
+            "News import batch recorded batch_id=%s source_system=%s accepted=%d rejected=%d",
+            batch_id,
+            source_system,
+            accepted_record_count,
+            rejected_record_count,
+        )
+    finally:
+        conn.close()
+
+    return batch_id

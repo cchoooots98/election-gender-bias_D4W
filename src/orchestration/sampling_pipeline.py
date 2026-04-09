@@ -1,7 +1,7 @@
 """Runnable orchestration for the official-data sampling slice.
 
 This module intentionally stops at the cohort-construction stage:
-Bronze official-data ingest → Silver dimensions → Gold sample_leaders cohort.
+Bronze official-data ingest -> Silver dimensions/facts -> Gold sample_leaders cohort.
 The later GDELT, NLP, and mart stages remain future work and must not be
 misrepresented as implemented by this runner.
 """
@@ -27,15 +27,26 @@ from src.config.settings import (
 from src.ingest.candidates import ingest_candidates, ingest_candidates_tour2
 from src.ingest.geography import ingest_geography
 from src.ingest.incumbents import ingest_incumbents
+from src.ingest.results import ingest_results_tour1, ingest_results_tour2
 from src.ingest.seats import ingest_seats_population
 from src.observability.run_logger import log_pipeline_run
+from src.transform.candidate_universe import build_candidate_universe
 from src.transform.dim_candidate import build_dim_candidate_leader
 from src.transform.dim_commune import build_dim_commune
+from src.transform.fact_election_result import build_fact_election_result
 from src.transform.sampling import build_sample
 
 logger = logging.getLogger(__name__)
 
 _FLOW_NAME = "sampling_pipeline"
+
+
+def _is_retryable_optional_ingest_error(exc: Exception) -> bool:
+    """Return whether an optional-ingest failure should bubble for retry."""
+    if isinstance(exc, requests.HTTPError):
+        status_code = exc.response.status_code if exc.response is not None else None
+        return status_code is None or status_code >= 500 or status_code == 429
+    return isinstance(exc, (requests.RequestException, OSError))
 
 
 @dataclass(frozen=True)
@@ -67,7 +78,7 @@ def run_sampling_pipeline(
     gold_dir: Path = GOLD_DIR,
     duckdb_path: Path = WAREHOUSE_PATH,
 ) -> SamplingPipelineResult:
-    """Run the currently implemented Bronze → Silver → Gold sampling slice.
+    """Run the currently implemented Bronze -> Silver -> Gold sampling slice.
 
     Args:
         raw_dir: Root raw-data directory.
@@ -106,16 +117,57 @@ def run_sampling_pipeline(
         _append_artifact(artifact_paths, incumbents_path)
         rows_ingested += _count_parquet_rows(incumbents_path)
 
+        results_tour1_path = ingest_results_tour1(
+            raw_dir=raw_dir, bronze_dir=bronze_dir
+        )
+        _append_artifact(artifact_paths, results_tour1_path)
+        rows_ingested += _count_parquet_rows(results_tour1_path)
+
         try:
             tour2_path = ingest_candidates_tour2(raw_dir=raw_dir, bronze_dir=bronze_dir)
             _append_artifact(artifact_paths, tour2_path)
             rows_ingested += _count_parquet_rows(tour2_path)
         except (requests.RequestException, OSError, ValueError) as exc:
+            if _is_retryable_optional_ingest_error(exc):
+                logger.warning(
+                    "Optional Tour 2 ingest hit retryable failure run_id=%s "
+                    "step=ingest_candidates_tour2 error=%r - re-raising so the "
+                    "scheduler can retry the task",
+                    run_id,
+                    exc,
+                )
+                raise
             error_count += 1
             status = "partial"
             logger.warning(
-                "Optional Tour 2 ingest failed run_id=%s — continuing without a "
-                "fresh Tour 2 bronze file: %s",
+                "Optional Tour 2 ingest failed run_id=%s - continuing without a "
+                "fresh Tour 2 bronze file because the source appears unavailable: %s",
+                run_id,
+                exc,
+            )
+
+        try:
+            results_tour2_path = ingest_results_tour2(
+                raw_dir=raw_dir, bronze_dir=bronze_dir
+            )
+            _append_artifact(artifact_paths, results_tour2_path)
+            rows_ingested += _count_parquet_rows(results_tour2_path)
+        except (requests.RequestException, OSError, ValueError) as exc:
+            if _is_retryable_optional_ingest_error(exc):
+                logger.warning(
+                    "Optional Tour 2 results hit retryable failure run_id=%s "
+                    "step=ingest_results_tour2 error=%r - re-raising so the "
+                    "scheduler can retry the task",
+                    run_id,
+                    exc,
+                )
+                raise
+            error_count += 1
+            status = "partial"
+            logger.warning(
+                "Optional Tour 2 results ingest failed run_id=%s - continuing with "
+                "round 1 authoritative scores only because the Tour 2 source "
+                "appears unavailable: %s",
                 run_id,
                 exc,
             )
@@ -128,6 +180,14 @@ def run_sampling_pipeline(
         rows_ingested += len(dim_commune_df)
         _append_artifact(artifact_paths, silver_dir / "dim_commune.parquet")
 
+        fact_election_result_df = build_fact_election_result(
+            bronze_dir=bronze_dir,
+            silver_dir=silver_dir,
+            duckdb_path=duckdb_path,
+        )
+        rows_ingested += len(fact_election_result_df)
+        _append_artifact(artifact_paths, silver_dir / "fact_election_result.parquet")
+
         dim_candidate_df = build_dim_candidate_leader(
             bronze_dir=bronze_dir,
             silver_dir=silver_dir,
@@ -136,6 +196,14 @@ def run_sampling_pipeline(
         )
         rows_ingested += len(dim_candidate_df)
         _append_artifact(artifact_paths, silver_dir / "dim_candidate_leader.parquet")
+
+        candidate_universe_df = build_candidate_universe(
+            silver_dir=silver_dir,
+            gold_dir=gold_dir,
+            duckdb_path=duckdb_path,
+        )
+        rows_ingested += len(candidate_universe_df)
+        _append_artifact(artifact_paths, gold_dir / "candidate_universe.parquet")
 
         sample_df = build_sample(
             silver_dir=silver_dir,
@@ -173,3 +241,9 @@ def run_sampling_pipeline(
         error_count=error_count,
         artifact_paths=[str(path) for path in artifact_paths],
     )
+
+
+
+
+
+
