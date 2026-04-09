@@ -1,0 +1,41 @@
+name: Smoke
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  integration-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -e . --no-build-isolation
+
+      - name: Run smoke integration slice
+        run: |
+          python -m pytest \
+            tests/test_transform.py \
+            tests/test_sampling.py \
+            tests/test_news_corpus.py \
+            tests/test_dashboard.py \
+            -k "build_dim_candidate_leader_returns_valid_row or manifest_records_department_concentration_warning or run_news_corpus_etl_builds_24_row_exposure_mart or run_news_corpus_etl_persists_redacted_text_artifacts or build_overview_metrics_aggregates_materialized_artifacts" \
+            -v --tb=short
+
+      - name: Import dashboard entrypoint
+        run: python -c "import src.dashboard.app"
