@@ -51,7 +51,7 @@ ANALYSIS_END_DATE: str = os.getenv("ANALYSIS_END_DATE", "2026-04-30")
 # Must be even: the matched-pair analysis requires equal M/F sample sizes.
 # Validation is intentionally deferred to the pipeline entry point, not here,
 # to keep settings.py free of business logic.
-CANDIDATE_SAMPLE_SIZE: int = int(os.getenv("CANDIDATE_SAMPLE_SIZE", "24"))
+CANDIDATE_SAMPLE_SIZE: int = int(os.getenv("CANDIDATE_SAMPLE_SIZE", "36"))
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # All paths are resolved relative to PROJECT_ROOT so the project works
@@ -183,6 +183,18 @@ DATA_SOURCES: dict[str, dict[str, str]] = {
         "format": "csv",
         "raw_filename": "candidates_tour2.csv",
     },
+    "results_tour1": {
+        "url": "https://www.data.gouv.fr/api/1/datasets/r/4feeef01-24f7-4d5a-914f-8aa806f31ec2",
+        "description": "Interior Ministry: Tour 1 municipal results, commune-level wide export",
+        "format": "csv",
+        "raw_filename": "results_tour1.csv",
+    },
+    "results_tour2": {
+        "url": "https://www.data.gouv.fr/api/1/datasets/r/6ff67a28-01bf-459e-beca-dd7aa8132dc1",
+        "description": "Interior Ministry: Tour 2 municipal results, commune-level wide export",
+        "format": "csv",
+        "raw_filename": "results_tour2.csv",
+    },
 }
 
 # ── City-size stratification thresholds (resident population) ─────────────────
@@ -242,18 +254,106 @@ PLM_ARRONDISSEMENT_MAP: dict[str, str] = {
 # commune is a PLM city without iterating through PLM_ARRONDISSEMENT_MAP.
 PLM_COMMUNE_CODES: frozenset[str] = frozenset({"75056", "69123", "13055"})
 
+# ── DOM-TOM exclusion ─────────────────────────────────────────────────────────
+# The study scope is French metropolitan media coverage. Overseas territories
+# (DOM-TOM) have a fundamentally different media ecosystem: GDELT indexes local
+# overseas media (La1ère, etc.) far less comprehensively than mainland outlets,
+# which would introduce systematic under-coverage unrelated to gender.
+# Excluding DOM-TOM makes the research scope explicit and removes a major confound.
+# Limitation is documented in README and research output.
+#
+# INSEE region codes for overseas territories (DOM-TOM):
+#   01 Guadeloupe · 02 Martinique · 03 Guyane · 04 La Réunion · 06 Mayotte
+# All metropolitan France regions use two-digit codes in the range 11–93.
+DOM_TOM_REG_CODES: frozenset[str] = frozenset({"01", "02", "03", "04", "06"})
+EXCLUDE_DOM_TOM: bool = bool(int(os.getenv("EXCLUDE_DOM_TOM", "1")))
+
 # ── Sampling configuration ────────────────────────────────────────────────────
-# Target: CANDIDATE_SAMPLE_SIZE = 24 = 12F + 12M, distributed across 3 strata.
+# Target: CANDIDATE_SAMPLE_SIZE = 36 = 18F + 18M, distributed across 3 strata.
+# 36 gives meaningful regression degrees of freedom (36 − k covariates) and
+# is the minimum for detecting medium effect sizes at acceptable statistical power.
 # Matched stratified sampling (not simple random) ensures gender balance WITHIN
 # each city-size stratum — preventing the confound of "large-city men vs.
 # small-city women" that simple random sampling would produce.
-SAMPLE_LARGE_TOTAL: int = 4  # 2F + 2M  (large cities ≥ 100k)
-SAMPLE_MEDIUM_TOTAL: int = 8  # 4F + 4M  (medium cities 20k–100k)
-SAMPLE_SMALL_TOTAL: int = 12  # 6F + 6M  (small cities 3.5k–20k)
+SAMPLE_LARGE_TOTAL: int = 6  # 3F + 3M  (large cities ≥ 100k)
+SAMPLE_MEDIUM_TOTAL: int = 12  # 6F + 6M  (medium cities 20k–100k)
+SAMPLE_SMALL_TOTAL: int = 18  # 9F + 9M  (small cities 3.5k–20k)
 
 # Minimum number of distinct INSEE region codes in the final sample.
-# Ensures geographic diversity — avoids a sample dominated by Île-de-France.
-SAMPLE_MIN_REGION_COUNT: int = 4
+# Soft constraint: logged as WARNING, never raises. Geographic diversity is
+# desirable but must not override the gender-balance hard constraint.
+SAMPLE_MIN_REGION_COUNT: int = 6
+
+# Post-hoc political bloc concentration guards.
+# These are transparency diagnostics, not sampling constraints.
+# Overall threshold: warn when one bloc reaches an unusually large share of the
+# full cohort. Stratum threshold: warn when a bloc dominates within a specific
+# city-size bucket, because the matched design is interpreted within strata.
+# Bucket x gender threshold: warn when one bloc dominates the exact subgroup
+# used in matched interpretation (for example medium-city women).
+SAMPLE_MAX_SINGLE_BLOC_RATIO: float = float(
+    os.getenv("SAMPLE_MAX_SINGLE_BLOC_RATIO", "0.45")
+)
+SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_STRATUM: float = float(
+    os.getenv("SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_STRATUM", "0.50")
+)
+SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_BUCKET_GENDER: float = float(
+    os.getenv("SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_BUCKET_GENDER", "0.50")
+)
+
+# Structural-confounding diagnostics. These stay as soft warnings rather than
+# selection constraints because the cohort should remain interpretable without
+# pretending the underlying candidate pool itself is perfectly balanced.
+SAMPLE_MAX_GENDER_BLOC_SHARE_GAP: float = float(
+    os.getenv("SAMPLE_MAX_GENDER_BLOC_SHARE_GAP", "0.15")
+)
+SAMPLE_MAX_GENDER_WIN_RATE_GAP: float = float(
+    os.getenv("SAMPLE_MAX_GENDER_WIN_RATE_GAP", "0.15")
+)
+SAMPLE_MIN_BUCKET_GENDER_SUBGROUP_SIZE: int = int(
+    os.getenv("SAMPLE_MIN_BUCKET_GENDER_SUBGROUP_SIZE", "4")
+)
+SAMPLE_MIN_NUANCE_GROUP_COUNT_PER_GENDER: int = int(
+    os.getenv("SAMPLE_MIN_NUANCE_GROUP_COUNT_PER_GENDER", "4")
+)
+
+# Sampling tie-break guard: a bloc can exceed its observed pool share inside a
+# bucket x gender cell, but not by an unlimited amount. This keeps the sampler
+# from over-correcting into rare blocs when reducing concentration.
+SAMPLE_MAX_BLOC_SHARE_LIFT_VS_POOL_SHARE: float = float(
+    os.getenv("SAMPLE_MAX_BLOC_SHARE_LIFT_VS_POOL_SHARE", "1.25")
+)
+
+# Regional concentration can still hide a narrower department-level skew.
+# This remains a soft diagnostic so the sampler stays feasible, but it must be
+# surfaced explicitly in the manifest when one department dominates a region's
+# sampled candidates.
+SAMPLE_MAX_SINGLE_DEPARTMENT_RATIO_PER_REGION: float = float(
+    os.getenv("SAMPLE_MAX_SINGLE_DEPARTMENT_RATIO_PER_REGION", "0.50")
+)
+
+# Regional concentration hard cap.
+# Allowing too many candidates from one region confounds the gender-bias
+# signal with a region-level media effect. This is an explicit cohort contract:
+# no more than four candidates from any single region in the final sample.
+SAMPLE_MAX_CANDIDATES_PER_REGION: int = int(
+    os.getenv("SAMPLE_MAX_CANDIDATES_PER_REGION", "4")
+)
+
+# Primary-cohort electoral viability filter.
+# The project now studies viable list leaders rather than the full list-leader
+# universe. A candidate is eligible for the primary cohort when they either:
+#   - win at least 10% of expressed votes in round 1, or
+#   - finish in the top 2 lists within their commune in round 1.
+# This narrows the study population to candidates who are more plausibly part
+# of the local media agenda, while still allowing smaller-commune competitive
+# races to enter via the rank-based fallback.
+SAMPLE_MIN_VOTE_SHARE_PCT_TOUR1: float = float(
+    os.getenv("SAMPLE_MIN_VOTE_SHARE_PCT_TOUR1", "10")
+)
+SAMPLE_MAX_RANK_TOUR1_FOR_VIABILITY: int = int(
+    os.getenv("SAMPLE_MAX_RANK_TOUR1_FOR_VIABILITY", "2")
+)
 
 # Reproducible random seed stored here so it appears in the sample manifest.
 # Changing this seed changes the sample — document any change in the commit message.

@@ -13,6 +13,7 @@ readme = "README.md"
 run-sampling-pipeline = "src.cli.run_sampling_pipeline:main"
 run-news-benchmark = "src.cli.run_news_benchmark:main"
 run-gdelt-backfill = "src.cli.run_gdelt_backfill:main"
+run-news-corpus-pipeline = "src.cli.run_news_corpus_pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]

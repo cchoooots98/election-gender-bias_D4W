@@ -1,51 +1,49 @@
-# Direct dependencies — maintained by hand.
+# Direct dependencies maintained by hand.
 # Run `pip-compile requirements.in -o requirements.txt` to regenerate the lockfile.
-# Run `pip install -r requirements.txt` to install.
+# Run `pip install -r requirements.txt` to install the default runnable stack.
 #
-# NOTE: apache-airflow is intentionally excluded — its constraint system is
-# incompatible with pip-compile. Install it separately when needed:
+# NOTE: apache-airflow is intentionally excluded because its constraints are not
+# compatible with this pip-compile workflow. Install Airflow separately when
+# needed:
 #   pip install apache-airflow --constraint <airflow-constraints-url>
 
-# ── Data storage ──────────────────────────────────────────────────────────────
-duckdb          # Columnar warehouse (Snowflake/BigQuery analogue — zero ops, single file)
-pyarrow         # Parquet read/write; also speeds up pandas I/O significantly
+# Data storage
+duckdb          # Columnar warehouse (Snowflake/BigQuery analogue; zero ops)
+pyarrow         # Parquet read/write and efficient pandas interop
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# Configuration
 python-dotenv   # Loads .env into os.environ; keeps secrets out of source code
 
-# ── Data ingestion ────────────────────────────────────────────────────────────
-requests        # HTTP client for data.gouv.fr, INSEE, GDELT API calls
-trafilatura     # Battle-tested article text extractor (handles French news sites)
-openpyxl        # Required by pandas read_excel() for .xlsx source files (seats/population)
-rapidfuzz       # Fast fuzzy string matching for RNE incumbent name matching (token_sort_ratio)
-pyyaml          # YAML benchmark manifest for multi-source news coverage tests
+# Data ingestion
+requests        # HTTP client for data.gouv.fr, INSEE, and provider APIs
+trafilatura     # Battle-tested article text extractor for French news sites
+openpyxl        # pandas.read_excel() support for .xlsx source files
+rapidfuzz       # Fast fuzzy string matching for incumbent matching
+pyyaml          # YAML benchmark manifests
 
-# ── Data analysis ─────────────────────────────────────────────────────────────
-pandas          # DataFrame manipulation; used at silver/gold boundaries
-numpy           # Numerical ops; implicit dep of pandas/scipy but listed explicitly
-scipy           # Statistical tests (chi-square, Mann-Whitney U for bias testing)
-statsmodels     # Poisson and negative-binomial regression for exposure modelling
+# Data analysis
+pandas          # DataFrame manipulation at silver/gold boundaries
+numpy           # Numerical helpers for metrics and regression prep
+scipy           # Statistical tests
+statsmodels     # Poisson regression audit layer
 
-# ── NLP ───────────────────────────────────────────────────────────────────────
-transformers    # HuggingFace: CamemBERT NER, DistilCamemBERT sentiment, NLI
-torch           # PyTorch backend for all transformer inference
-sentence-transformers  # Sentence-CamemBERT embeddings for article deduplication
+# Dashboard
+streamlit       # Python-native dashboard
 
-# ── dbt ───────────────────────────────────────────────────────────────────────
-dbt-duckdb      # dbt adapter for DuckDB; runs SQL models against municipal.duckdb
-
-# ── Dashboard ─────────────────────────────────────────────────────────────────
-streamlit       # Python-native dashboard; no JS required
-
-# ── Visualisation ─────────────────────────────────────────────────────────────
+# Visualization
 matplotlib      # Base plotting library
-seaborn         # Statistical visualisation on top of matplotlib
+seaborn         # Statistical visualization on top of matplotlib
 
-# ── Notebooks ─────────────────────────────────────────────────────────────────
-jupyterlab      # EDA environment; notebooks in notebooks/ only, never imported by src/
+# Notebooks
+jupyterlab      # EDA environment; notebooks stay outside production code
 
-# ── Dev / quality tools ───────────────────────────────────────────────────────
-black           # Opinionated formatter — eliminates style debates
-ruff            # Linter (replaces flake8 + isort + pylint; 10-100x faster)
+# Dev / quality tools
+black==24.10.0  # Stable formatter version for the Windows CI/dev toolchain
+ruff            # Fast linter
 pytest          # Test runner
-pip-tools       # Provides pip-compile to regenerate this lockfile
+pytest-cov      # Coverage plugin backing the documented test-coverage command
+pip-tools       # Provides pip-compile for lockfile generation
+
+# Optional future stack
+# Transformer NLP models and dbt stay out of the default environment until the
+# corresponding production modules are committed to this repository.

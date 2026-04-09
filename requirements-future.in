@@ -1,0 +1,7 @@
+-r requirements.in
+
+# Optional future stack kept separate from the default runnable environment.
+transformers
+torch
+sentence-transformers
+dbt-duckdb
