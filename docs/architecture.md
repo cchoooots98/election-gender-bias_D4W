@@ -8,13 +8,19 @@
 
 Two architectural horizons coexist in this project:
 
-- **Implemented sampling slice**: official-data ingest -> `dim_commune` ->
-  `dim_candidate_leader` -> `gold.sample_leaders` -> `sample_manifest.json`
-- **Planned full pipeline**: sampled cohort -> GDELT article collection ->
-  NLP enrichment -> analytical marts -> Streamlit dashboard
+- **Implemented sampling slice**: official-data ingest -> conformed Silver
+  dimensions/facts -> `gold.candidate_universe` -> `gold.sample_leaders`
+- **Implemented downstream slices (separate entry points)**: sampled cohort ->
+  Europresse-first news corpus backbone -> exposure / regression audit marts ->
+  Streamlit dashboard
+- **Planned full pipeline**: implemented slice -> transformer NLP enrichment ->
+  richer analytical marts
 
 This distinction matters for portfolio honesty: the runnable script currently
-delivers the cohort-construction slice, not the entire future roadmap.
+delivers the implemented audit slice, not the entire future roadmap.
+
+Active news-analysis window for the implemented corpus slice:
+`2025-11-01` to `2026-04-30`.
 
 ---
 
@@ -28,14 +34,13 @@ flowchart LR
     subgraph SRC["Data Sources"]
         A1["data.gouv.fr<br>Candidates · RNE · Seats"]
         A2["INSEE COG 2026"]
-        A3["GDELT DOC 2.0 API"]
-        A4["News websites<br>trafilatura"]
+        A3["Europresse exports<br>PDF · HTML · TXT · CSV"]
     end
 
     subgraph BRZ["Bronze (raw copies, append-only)"]
         B1["candidates_tour1/2<br>seats_population · rne_incumbents"]
         B2["cog_communes"]
-        B3["gdelt_results"]
+        B3["news_source_record"]
     end
 
     subgraph SLV["Silver (cleaned · validated · joined)"]
@@ -44,9 +49,10 @@ flowchart LR
             D2["dim_candidate_leader"]
         end
         subgraph FACTS["Facts"]
-            F1["fact_article"]
-            F2["fact_mention"]
-            F3["fact_stereotype<br>word_counts"]
+            F1["fact_article_source"]
+            F2["fact_article"]
+            F3["fact_mention"]
+            F4["fact_stereotype<br>word_counts"]
         end
     end
 
@@ -61,33 +67,38 @@ flowchart LR
     end
 
     subgraph GLD["Gold"]
-        G0["sample_leaders ★"]
-        G1["mart_exposure_metrics"]
-        G2["mart_framing_metrics"]
-        G3["mart_bias_indicators"]
-        G4["mart_regression_results"]
+        G0["candidate_universe"]
+        G1["sample_leaders ★"]
+        G2["mart_exposure_metrics"]
+        G3["mart_framing_metrics"]
+        G4["mart_bias_indicators"]
+        G5["mart_regression_results"]
     end
 
     A1 --> B1
     A2 --> B2
     A3 --> B3
-    A4 --> F1
 
     B1 & B2 --> D1 & D2
-    D2 --> G0
-    G0 --> B3
+    D1 & D2 --> G0
+    G0 --> G1
+    G1 --> B3
     B3 --> F1
+    F1 --> F2
 
-    F1 --> NLP
-    NLP --> F2 & F3
+    F2 --> NLP
+    NLP --> F3 & F4
 
-    D2 & F2 --> G1 & G2 & G3 & G4
-    G1 & G2 & G3 & G4 --> DASH["Streamlit Dashboard"]
+    G1 & F3 --> G2 & G3 & G4 & G5
+    G2 & G3 & G4 & G5 --> DASH["Streamlit Dashboard"]
 ```
 
-**Runnable-slice note.** The implemented runner currently stops at
-`gold.sample_leaders` plus `sample_manifest.json`. The GDELT, NLP, and mart
-sections shown above remain planned extensions.
+**Runnable-slice note.** `src/orchestration/sampling_pipeline.py` currently
+stops after materializing `gold.candidate_universe` and `gold.sample_leaders`.
+`src/orchestration/news_corpus_pipeline.py` then runs the Europresse manifest
+through `news_source_record`, `fact_article_source`, `fact_article`,
+`fact_mention`, and the exposure / regression audit marts. The transformer NLP
+blocks shown above remain planned extensions.
 
 ---
 
@@ -114,14 +125,25 @@ erDiagram
         varchar full_name
         varchar gender
         varchar commune_insee FK
-        varchar city_size_bucket
-        varchar reg_code
         integer same_name_candidate_count
         varchar list_nuance
         varchar nuance_group
         boolean is_incumbent
         float   incumbent_match_score
+        boolean incumbent_match_auditable
         boolean advanced_to_tour2
+    }
+
+    CANDIDATE_UNIVERSE {
+        char    leader_id PK
+        varchar commune_name
+        varchar dep_code
+        varchar reg_code
+        varchar city_size_bucket
+        float   score_tour1_pct_expressed
+        integer score_tour1_rank
+        boolean won_final_round
+        boolean is_viable
     }
 
     SAMPLE_LEADERS {
@@ -173,12 +195,20 @@ erDiagram
     }
 
     DIM_COMMUNE ||--o{ DIM_CANDIDATE_LEADER : "commune_insee"
-    DIM_CANDIDATE_LEADER ||--o{ SAMPLE_LEADERS : "leader_id"
+    DIM_CANDIDATE_LEADER ||--o{ CANDIDATE_UNIVERSE : "leader_id"
+    DIM_COMMUNE ||--o{ CANDIDATE_UNIVERSE : "commune_insee"
+    CANDIDATE_UNIVERSE ||--o{ SAMPLE_LEADERS : "leader_id"
     DIM_CANDIDATE_LEADER ||--o{ FACT_MENTION : "leader_id"
     FACT_ARTICLE ||--o{ FACT_MENTION : "article_id"
     FACT_ARTICLE ||--o| FACT_ARTICLE : "canonical_article_id"
     FACT_MENTION ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
 ```
+
+`is_incumbent` is a nullable boolean contract: `TRUE`/`FALSE` when a commune-level
+RNE comparison was possible, and `NULL` when no reliable RNE lookup row exists
+for that commune. Commune attributes and election-result summary fields are now
+joined once in `gold.candidate_universe`, which feeds the cohort viability and
+sampling slices.
 
 ---
 
@@ -189,8 +219,8 @@ erDiagram
 | Warehouse | DuckDB (single file) | Snowflake / BigQuery (local) |
 | File format | Parquet (Snappy compressed) | Delta Lake / ORC |
 | Orchestration | Scripted runner now; Airflow planned | Prefect, Dagster, Airflow |
-| SQL transforms | dbt-duckdb | dbt-snowflake, dbt-bigquery |
-| French NLP | CamemBERT family (HuggingFace) | BERT (English equivalent) |
-| Text extraction | trafilatura | Scrapy, newspaper3k |
+| Future SQL layer | dbt-duckdb (planned, not scaffolded in repo) | dbt-snowflake, dbt-bigquery |
+| Future French NLP | CamemBERT family (planned) | BERT (English equivalent) |
+| Text extraction | pdfminer.six + BeautifulSoup + trafilatura fallback | Parser stack for archive exports |
 | Dashboard | Streamlit | Tableau, Looker |
 | CI/CD | GitHub Actions | Jenkins, CircleCI |

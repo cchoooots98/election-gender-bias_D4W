@@ -14,16 +14,19 @@ slice** of the broader research design:
 `Bronze official data/news imports -> Silver dimensions/facts -> Gold cohort + marts`
 
 The executable repository now materializes the 36-person viable-candidate
-cohort, the source-agnostic news corpus backbone, and the first exposure /
+cohort, the Europresse-first news corpus backbone, and the first exposure /
 regression audit marts. The transformer-based NLP enrichment stack remains the
 main planned extension.
+
+Active news-analysis window for the implemented corpus slice:
+`2025-11-01` to `2026-04-01`.
 
 The implemented layers are:
 
 | Layer | Status | Current contract |
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` with provenance and redacted text surrogates |
-| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_article_discovery`, `fact_mention`, and quarantine outputs |
+| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, and quarantine outputs |
 | Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_regression_results` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
@@ -146,8 +149,8 @@ appended.
 ### `bronze/news_source_record/*`
 
 - Grain: one row per imported news source record before article-source normalization
-- Source: restricted exports (for example Europresse) or supplemental provider fetches
-- Role: auditable Bronze landing table for the source-agnostic corpus pipeline
+- Source: restricted Europresse exports registered in `news_import_manifest.json`
+- Role: auditable Bronze landing table for the Europresse corpus pipeline
 - Text contract: persisted artifacts store `raw_body_text_hash` / preview / length
   surrogates instead of the full article body; full text is used transiently in
   memory during the ETL run only
@@ -271,12 +274,6 @@ Current implemented quarantine outputs include:
 - Text contract: persisted tables keep only redacted `body_text` plus
   preview/hash/length surrogates; full text is not retained on disk
 
-### `silver.fact_article_discovery`
-
-- Grain: one row per provider discovery hit
-- Source: supplemental provider search results merged into the corpus ETL
-- Role: provenance/audit bridge between discovery providers and canonical articles
-
 ### `silver.fact_mention`
 
 - Grain: one row per canonical article × sampled candidate match
@@ -356,7 +353,7 @@ Gold contains stable analysis-facing artifacts.
 | `full_name` | VARCHAR | Candidate name |
 | `gender` | VARCHAR(1) | `M` or `F` |
 | `commune_insee` | VARCHAR(5) | Foreign key to `silver.dim_commune` |
-| `commune_name` | VARCHAR | Human-readable commune label — joined from `silver.dim_commune` at gold write time; required for GDELT text query construction |
+| `commune_name` | VARCHAR | Human-readable commune label — joined from `silver.dim_commune` at gold write time; required for archive search disambiguation |
 | `dep_code` | VARCHAR | Department code — disambiguates same-name communes (e.g. multiple "Saint-Martin"); joined from `silver.dim_commune` at gold write time |
 | `reg_code` | VARCHAR | Region code |
 | `city_size_bucket` | VARCHAR | Sampling stratum |
@@ -462,8 +459,7 @@ source freshness and provenance.
 ### `meta.meta_run`
 
 This table records one row per execution of an orchestrated pipeline flow such
-as `run-sampling-pipeline`, `run-news-benchmark`, or
-`run-news-corpus-pipeline`.
+as `run-sampling-pipeline` or `run-news-corpus-pipeline`.
 
 The installable CLI is backed by `src.cli.run_sampling_pipeline`. The legacy
 `scripts/run_sampling_pipeline.py` file remains only as a compatibility
@@ -527,5 +523,5 @@ meta.meta_run records execution lineage across implemented pipelines
 | `gold.sample_leaders` | Implemented | Optional future versioning if multiple cohort runs must be retained |
 | `meta.meta_source_snapshot` | Implemented | No immediate action |
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
-| News ingest and article pipeline | Implemented | Continue enriching provider coverage and QA diagnostics |
+| News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | NLP fact tables and marts | Partially implemented | `fact_mention`/framing scaffolding exists; add transformer enrichments next |

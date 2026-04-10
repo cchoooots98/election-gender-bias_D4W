@@ -1,19 +1,38 @@
-# Makefile — common development commands for election-gender-bias_D4W.
+# Makefile - common development commands for election-gender-bias_D4W.
 #
-# Usage: make <target>   (e.g. make lint, make test)
+# Usage: make <target>   (for example: make lint, make test)
 # Run  : make            to see available targets (default: help)
 #
-# Why a Makefile: standardises commands so every contributor (and CI) runs
-# exactly the same tool invocations. "make lint" is the same on every machine.
+# Every target is pinned to the project virtual environment so local PATH
+# differences cannot silently swap in the wrong interpreter or tool version.
+
+ifeq ($(OS),Windows_NT)
+VENV_BIN := .venv/Scripts
+PYTHON := $(VENV_BIN)/python.exe
+else
+VENV_BIN := .venv/bin
+PYTHON := $(VENV_BIN)/python
+endif
+
+PIP := $(PYTHON) -m pip
+PIP_COMPILE := $(PYTHON) -m piptools compile
+PYTEST := $(PYTHON) -m pytest
+RUFF := $(PYTHON) -m ruff
+BLACK := $(PYTHON) -m black
+JUPYTER := $(PYTHON) -m jupyterlab
+STREAMLIT := $(PYTHON) -m streamlit
 
 .PHONY: help lint format format-check test test-coverage install compile \
         notebook dashboard run-sampling-pipeline \
-        dbt-run dbt-test dbt-docs
+        run-news-corpus-pipeline run-news-corpus-sa48 run-news-corpus-sa-relaxed \
+        generate-manifest
 
-# ── Default target ────────────────────────────────────────────────────────────
 help:
 	@echo ""
-	@echo "  Election Gender Bias D4W — available make targets"
+	@echo "  Election Gender Bias D4W - available make targets"
+	@echo ""
+	@echo "  Virtual environment"
+	@echo "    all targets use $(PYTHON)"
 	@echo ""
 	@echo "  Code quality"
 	@echo "    lint           ruff check src/ tests/ scripts/"
@@ -31,64 +50,86 @@ help:
 	@echo "  Development"
 	@echo "    notebook       jupyter lab"
 	@echo "    dashboard      streamlit run src/dashboard/app.py"
-	@echo "    run-sampling-pipeline  python -m src.cli.run_sampling_pipeline"
-	@echo ""
-	@echo "  dbt"
-	@echo "    dbt-run        dbt run"
-	@echo "    dbt-test       dbt test"
-	@echo "    dbt-docs       dbt docs generate && dbt docs serve"
+	@echo "    run-sampling-pipeline      python -m src.cli.run_sampling_pipeline"
+	@echo "    run-news-corpus-pipeline   primary cohort (cohort_36, default sample_leaders)"
+	@echo "    run-news-corpus-sa48       sensitivity analysis: expanded cohort (48 candidates)"
+	@echo "    run-news-corpus-sa-relaxed sensitivity analysis: relaxed sampling constraints"
+	@echo "    generate-manifest          scan cohort dir, write news_import_manifest.json"
+	@echo "      e.g.: make generate-manifest COHORT_DIR=data/raw/news/cohort_36 COHORT_ID=cohort36 OPERATOR=yyfen WINDOW_START=2025-11-01 WINDOW_END=2026-04-30 NOTES=..."
 	@echo ""
 
-# ── Code quality ──────────────────────────────────────────────────────────────
 lint:
-	ruff check src/ tests/ scripts/
+	$(RUFF) check src/ tests/ scripts/
 
-# Formats src/, tests/, and notebooks/ — notebooks/ excluded from lint
-# because notebooks contain non-standard code patterns intentionally.
 format:
-	black src/ tests/ scripts/ notebooks/
+	$(BLACK) src/ tests/ scripts/ notebooks/
 
-# CI mode: exits non-zero if any file would be reformatted (no writes).
-# Used in ci.yml to block PRs with unformatted code.
 format-check:
-	black --check src/ tests/ scripts/
+	$(BLACK) --check src/ tests/ scripts/
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
 test:
-	pytest tests/ -v --tb=short
+	$(PYTEST) tests/ -v --tb=short
 
-# --cov-report=term-missing shows which lines are not covered — actionable output.
 test-coverage:
-	pytest tests/ --cov=src --cov-report=term-missing
+	$(PYTEST) tests/ --cov=src --cov-report=term-missing
 
-# ── Dependencies ──────────────────────────────────────────────────────────────
-# Install exact pinned versions — guarantees reproducibility.
 install:
-	pip install -r requirements.txt
-	pip install -e . --no-build-isolation
+	$(PIP) install -r requirements.txt
+	$(PIP) install -e . --no-build-isolation
 
-# Regenerate the lockfile after editing requirements.in.
-# --strip-extras: omit extras markers for cleaner output.
 compile:
-	pip-compile requirements.in -o requirements.txt --strip-extras
+	$(PIP_COMPILE) requirements.in -o requirements.txt --strip-extras
 
-# ── Development ───────────────────────────────────────────────────────────────
 notebook:
-	jupyter lab
+	$(JUPYTER) lab
 
 dashboard:
-	streamlit run src/dashboard/app.py
+	$(STREAMLIT) run src/dashboard/app.py
 
 run-sampling-pipeline:
-	python -m src.cli.run_sampling_pipeline
+	$(PYTHON) -m src.cli.run_sampling_pipeline
 
-# ── dbt ───────────────────────────────────────────────────────────────────────
-dbt-run:
-	dbt run
+run-news-corpus-pipeline:
+	$(PYTHON) -m src.cli.run_news_corpus_pipeline
 
-dbt-test:
-	dbt test
+# Sensitivity analysis: expanded cohort (48 candidates, 24F + 24M).
+# Requires: data/raw/news/cohort_sa_48/news_import_manifest.json
+#           data/gold/sample_leaders_sa48.parquet
+run-news-corpus-sa48:
+	$(PYTHON) -m src.cli.run_news_corpus_pipeline \
+		--manifest-path data/raw/news/cohort_sa_48/news_import_manifest.json \
+		--sample-leaders-path data/gold/sample_leaders_sa48.parquet
 
-# Generates HTML docs then opens them in the browser at localhost:8080.
-dbt-docs:
-	dbt docs generate && dbt docs serve
+# Sensitivity analysis: relaxed sampling constraints.
+# Requires: data/raw/news/cohort_sa_relaxed/news_import_manifest.json
+#           data/gold/sample_leaders_sa_relaxed.parquet
+run-news-corpus-sa-relaxed:
+	$(PYTHON) -m src.cli.run_news_corpus_pipeline \
+		--manifest-path data/raw/news/cohort_sa_relaxed/news_import_manifest.json \
+		--sample-leaders-path data/gold/sample_leaders_sa_relaxed.parquet
+
+# Generate news_import_manifest.json by scanning a cohort directory for PDFs.
+# Required variables: COHORT_DIR, COHORT_ID, OPERATOR, WINDOW_START, WINDOW_END
+# Optional variable:  NOTES (default empty)
+# Example:
+#   make generate-manifest \
+#     COHORT_DIR=data/raw/news/cohort_36 COHORT_ID=cohort36 OPERATOR=yyfen \
+#     WINDOW_START=2025-11-01 WINDOW_END=2026-04-30 NOTES="Primary cohort."
+COHORT_DIR   ?=
+COHORT_ID    ?=
+OPERATOR     ?=
+WINDOW_START ?= 2025-11-01
+WINDOW_END   ?= 2026-04-30
+NOTES        ?=
+# Space-separated list of extra dirs whose PDFs are included by reference (no copy).
+# Example: INCLUDE_DIRS=data/raw/news/cohort_36
+INCLUDE_DIRS ?=
+generate-manifest:
+	$(PYTHON) scripts/generate_news_manifest.py \
+		--cohort-dir "$(COHORT_DIR)" \
+		--cohort-id "$(COHORT_ID)" \
+		--operator "$(OPERATOR)" \
+		--window-start "$(WINDOW_START)" \
+		--window-end "$(WINDOW_END)" \
+		--notes "$(NOTES)" \
+		$(if $(INCLUDE_DIRS),--include-dirs $(INCLUDE_DIRS),)

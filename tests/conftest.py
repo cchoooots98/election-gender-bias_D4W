@@ -60,12 +60,13 @@ def sample_candidate_df() -> pd.DataFrame:
             "full_name": ["Jean Dupont", "Marie Durand"],
             "gender": ["M", "F"],
             "commune_insee": ["75056", "69123"],
-            "commune_name": ["Paris", "Lyon"],
-            "list_name": ["Liste Avenir Paris", "Liste Demain Lyon"],
+            "same_name_candidate_count": [1, 1],
+            "list_nuance": ["DVC", "DVG"],
+            "nuance_group": ["divers", "gauche"],
             "is_incumbent": [True, False],
-            # Timezone-aware timestamp: required by the silver schema.
-            # Using a fixed date avoids test failures caused by time-of-day.
-            "_ingested_at": pd.Timestamp("2026-02-15T00:00:00", tz="UTC"),
+            "incumbent_match_score": [0.93, 0.0],
+            "incumbent_match_auditable": [True, False],
+            "advanced_to_tour2": pd.Series([True, False], dtype="boolean"),
         }
     )
 
