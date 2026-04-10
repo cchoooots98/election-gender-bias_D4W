@@ -2,7 +2,7 @@
 
 This module intentionally stops at the cohort-construction stage:
 Bronze official-data ingest -> Silver dimensions/facts -> Gold sample_leaders cohort.
-The later GDELT, NLP, and mart stages remain future work and must not be
+The later Europresse corpus, NLP, and mart stages remain separate work and must not be
 misrepresented as implemented by this runner.
 """
 
@@ -241,9 +241,3 @@ def run_sampling_pipeline(
         error_count=error_count,
         artifact_paths=[str(path) for path in artifact_paths],
     )
-
-
-
-
-
-

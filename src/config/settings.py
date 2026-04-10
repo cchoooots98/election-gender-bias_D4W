@@ -4,7 +4,7 @@ All tuneable values are loaded from the .env file (via python-dotenv) so
 that no secrets or environment-specific paths are hard-coded in source code.
 
 Usage in other modules:
-    from src.config.settings import WAREHOUSE_PATH, GDELT_MAX_RECORDS
+    from src.config.settings import WAREHOUSE_PATH, ANALYSIS_START_DATE
 
 Industry pattern: a central settings module (also called "config" or "env")
 is standard in Django, FastAPI, and most data pipeline frameworks. It keeps
@@ -24,11 +24,6 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 
 
-def _parse_csv_env(value: str) -> tuple[str, ...]:
-    """Parse a comma-separated env var into a normalized tuple."""
-    return tuple(item.strip() for item in value.split(",") if item.strip())
-
-
 # ── Logging ───────────────────────────────────────────────────────────────────
 # Configured once here; every module then calls logging.getLogger(__name__).
 # ISO-8601 timestamps make log correlation with external systems straightforward.
@@ -45,7 +40,7 @@ logging.basicConfig(
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 
 # ── Analysis scope ────────────────────────────────────────────────────────────
-ANALYSIS_START_DATE: str = os.getenv("ANALYSIS_START_DATE", "2026-02-01")
+ANALYSIS_START_DATE: str = os.getenv("ANALYSIS_START_DATE", "2025-11-01")
 ANALYSIS_END_DATE: str = os.getenv("ANALYSIS_END_DATE", "2026-04-30")
 
 # Must be even: the matched-pair analysis requires equal M/F sample sizes.
@@ -69,37 +64,6 @@ WAREHOUSE_PATH: Path = PROJECT_ROOT / os.getenv(
 )
 
 # ── GDELT ─────────────────────────────────────────────────────────────────────
-# GDELT DOC 2.0 API hard cap is 250 records per request; do not raise this.
-GDELT_MAX_RECORDS: int = int(os.getenv("GDELT_MAX_RECORDS", "250"))
-
-# Respectful rate limiting: 2 s between requests avoids triggering GDELT's
-# anti-scraping protections and is courteous to a free public API.
-GDELT_REQUEST_DELAY_SECONDS: float = float(
-    os.getenv("GDELT_REQUEST_DELAY_SECONDS", "2")
-)
-
-# Hybrid discovery order for the main ingest path. We keep GDELT out of the
-# default fast path because its public API is rate-limited aggressively; the
-# project already exposes a dedicated ``run_gdelt_ingest`` wrapper for slower
-# backfill-style runs.
-NEWS_PROVIDER_ORDER: tuple[str, ...] = _parse_csv_env(
-    os.getenv("NEWS_PROVIDER_ORDER", "curated,gnews")
-)
-
-# Benchmark runs should stay comparable and operationally stable. Keeping the
-# default benchmark order to curated + GNews avoids letting GDELT's availability
-# dominate the benchmark summary; GDELT can still be benchmarked separately.
-NEWS_BENCHMARK_PROVIDER_ORDER: tuple[str, ...] = _parse_csv_env(
-    os.getenv("NEWS_BENCHMARK_PROVIDER_ORDER", "curated,gnews")
-)
-
-# Third-party benchmark API key. Optional for local development because the
-# benchmark can still run Tier 1 and Tier 2 without it; the adapter will mark
-# the provider unavailable instead of crashing.
-GNEWS_API_KEY: str = os.getenv("GNEWS_API_KEY", "")
-GNEWS_MAX_ARTICLES_PER_PAGE: int = int(os.getenv("GNEWS_MAX_ARTICLES_PER_PAGE", "10"))
-GNEWS_MAX_PAGES_PER_QUERY: int = int(os.getenv("GNEWS_MAX_PAGES_PER_QUERY", "3"))
-
 # Keep artifact paths portable across Windows and Linux. 240 leaves safety
 # margin below Windows' common 260-character MAX_PATH limit while still
 # allowing descriptive Hive-style partitions.
@@ -204,7 +168,7 @@ DATA_SOURCES: dict[str, dict[str, str]] = {
 # negligible — registered voters track resident population within ~5%.
 # Limitation is documented in README.
 # Communes < CITY_SIZE_SMALL_THRESHOLD are EXCLUDED from the sample:
-# media coverage near these communes is near-zero and GDELT returns 0 results.
+# media coverage near these communes is near-zero in the Europresse archive.
 CITY_SIZE_LARGE_THRESHOLD: int = 100_000  # ≥ 100k → 'large'
 CITY_SIZE_MEDIUM_THRESHOLD: int = 20_000  # 20k–99k → 'medium'
 CITY_SIZE_SMALL_THRESHOLD: int = 3_500  # 3.5k–20k → 'small'; < 3500 → 'excluded'
