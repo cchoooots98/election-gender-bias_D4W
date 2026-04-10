@@ -15,11 +15,14 @@ pyarrow         # Parquet read/write and efficient pandas interop
 python-dotenv   # Loads .env into os.environ; keeps secrets out of source code
 
 # Data ingestion
-requests        # HTTP client for data.gouv.fr, INSEE, and provider APIs
+requests        # HTTP client for official datasets and article fetches
 trafilatura     # Battle-tested article text extractor for French news sites
+beautifulsoup4  # HTML parser for document-export articles (explicit dep; also pulled by trafilatura)
+pdfminer-six    # PDF text extraction handling modern CIDFont/ToUnicode encodings (Europresse)
+beautifulsoup4  # Explicit HTML parser dependency used by corpus.py
 openpyxl        # pandas.read_excel() support for .xlsx source files
 rapidfuzz       # Fast fuzzy string matching for incumbent matching
-pyyaml          # YAML benchmark manifests
+pyyaml          # Structured config files and reusable local manifests
 
 # Data analysis
 pandas          # DataFrame manipulation at silver/gold boundaries

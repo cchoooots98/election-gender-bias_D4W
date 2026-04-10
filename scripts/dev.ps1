@@ -48,8 +48,6 @@ switch ($Command) {
         Write-Host "  notebook"
         Write-Host "  dashboard"
         Write-Host "  run-sampling-pipeline"
-        Write-Host "  run-news-benchmark"
-        Write-Host "  run-gdelt-backfill"
         Write-Host "  run-news-corpus-pipeline"
     }
     "lint" {
@@ -82,12 +80,6 @@ switch ($Command) {
     }
     "run-sampling-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_sampling_pipeline")
-    }
-    "run-news-benchmark" {
-        Invoke-ProjectCommand $Python @("-m", "src.cli.run_news_benchmark")
-    }
-    "run-gdelt-backfill" {
-        Invoke-ProjectCommand $Python @("-m", "src.cli.run_gdelt_backfill")
     }
     "run-news-corpus-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_news_corpus_pipeline")
