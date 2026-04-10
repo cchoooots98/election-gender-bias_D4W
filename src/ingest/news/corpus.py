@@ -1,9 +1,9 @@
-"""Source-agnostic news corpus contracts and normalization helpers.
+"""Europresse-first news corpus contracts and normalization helpers.
 
-This module shifts the project from provider-centric article discovery to a
-source-agnostic corpus ETL backbone. That matters because Europresse exports
-may arrive as CSV, XLSX, HTML, TXT, or PDF files rather than stable public
-URLs, so URL-based identity can no longer be the primary article contract.
+This module centers the corpus on restricted archive exports rather than live
+provider discovery. Europresse batches may arrive as CSV, XLSX, HTML, TXT, or
+PDF files rather than stable public URLs, so URL-based identity can no longer
+be the primary article contract.
 """
 
 from __future__ import annotations
@@ -26,6 +26,13 @@ try:
     import trafilatura
 except ImportError:  # pragma: no cover - depends on local environment
     trafilatura = None
+
+try:
+    from pdfminer.high_level import extract_text as _pdfminer_extract_text
+
+    _PDFMINER_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency; install pdfminer-six
+    _PDFMINER_AVAILABLE = False
 
 from src.config.settings import DQ_MAX_NULL_RATE, DQ_MIN_ARTICLE_TEXT_LENGTH
 from src.ingest.news.models import (
@@ -52,7 +59,88 @@ _TABLE_EXTENSIONS = {".csv", ".xlsx"}
 _DOCUMENT_EXTENSIONS = {".html", ".htm", ".txt"}
 _PDF_EXTENSIONS = {".pdf"}
 _SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
+# Legacy PostScript text operator — only matches old-style PDFs; modern CIDFont
+# PDFs (e.g. Europresse exports) use Unicode-mapped hex streams invisible to this regex.
 _PDF_TEXT_PATTERN = re.compile(rb"\(([^()]*)\)\s*Tj")
+# ── Europresse batch-PDF article structure ────────────────────────────────────
+# CEDROM-SNi Europresse exports embed multiple articles per PDF.  pdfminer maps
+# the copyright bullet (•, U+2022) that Europresse uses as a prefix for metadata
+# fields.  The actual character in the raw PDF glyphs resolves to U+2022.
+#
+# Each article's header, in order:
+#   • YYYY Outlet. Tous droits réservés.    ← copyright line
+#   news•YYYYMMDD•PR•HASH                  ← article ID
+#   [Source name / type block — first occurrence per source only]
+#   [French day name] D Month YYYY          ← date with day-name prefix
+#   Outlet name                             ← outlet
+#   • p. PAGE_REF                           ← page reference
+#   • N words                               ← word-count anchor (our primary split key)
+#
+# After the anchor: Page/code reference lines, then title, author, body text.
+# Body ends at the CEDROM-SNi boilerplate footer: "This document is destined…".
+_EUROPRESSE_WORD_COUNT_PATTERN = re.compile(r"\u2022\s+(\d+)\s+words")
+_EUROPRESSE_DOCUMENT_COUNT_PATTERN = re.compile(
+    r"\b(\d+)\s+documents\b",
+    re.IGNORECASE,
+)
+# Day-name prefix is optional: print editions include it ("Dimanche 9 novembre
+# 2025"), web editions omit it ("23 mars 2026").
+_EUROPRESSE_DATE_PATTERN = re.compile(
+    r"(?:(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+)?"
+    r"(\d{1,2}\s+(?:janvier|f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t"
+    r"|septembre|octobre|novembre|d[eé]cembre)\s+\d{4})",
+    re.IGNORECASE,
+)
+_EUROPRESSE_FOOTER_PATTERN = re.compile(
+    r"This document is destined for the exclusive use",
+    re.IGNORECASE,
+)
+# Page reference lines that appear between the anchor and the article title.
+# Europresse prints page codes either on their own line ("lyoe18") or inline
+# with the label ("Page lyon23") when multiple page references exist.
+# Also appears mid-article when an article spans multiple PDF pages.
+_EUROPRESSE_PAGE_REF_PATTERN = re.compile(
+    r"^\s*(?:Page(?:\s+\w+)?|[a-z]{3,6}\d{1,3})\s*$",
+    re.IGNORECASE,
+)
+# Europresse metadata labels printed at the top of each article's page.
+# Each label is immediately followed by its value on the next line.
+# "Origin" may span two value lines (city + geographic suffix).
+_EUROPRESSE_METADATA_LABEL_PATTERN = re.compile(
+    r"^\s*(?:Source\s+name|Source\s+type|Periodicity|Geographical\s+coverage|Origin)\s*$",
+    re.IGNORECASE,
+)
+# Lines to skip unconditionally in the post-anchor preamble (no following value
+# line).  These include CEDROM-SNi legal boilerplate, page headers, article IDs,
+# known metadata values, and standalone French date lines.
+_EUROPRESSE_SKIP_LINE_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"Saved\s+documents.*|"  # page header: "Saved documents by…"
+    r"(?:news|web)\W.*\d{8}.*|"  # article ID: "news•20251109•PR•…"
+    r"The\s+present\s+document.*|"  # CEDROM-SNi copyright sentence (line 1)
+    r"protected\s+under.*|"  # copyright sentence (line 2)
+    r"and\s+conventions[.;]?\s*|"  # copyright sentence (line 3)
+    r"used\s+for\s+any\s+other.*|"  # copyright sentence (line 4)
+    r"Read\s+more\s*|"  # web-article "Read more" link text
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday).*\d{4}.*|"
+    # Standalone French date lines (optional weekday prefix):
+    r"(?:(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+)?"
+    r"\d{1,2}\s+(?:janvier|f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t"
+    r"|septembre|octobre|novembre|d[eé]cembre)\s+\d{4}|"
+    r"Daily|Weekly|Monthly|Irregular|Continuously|"  # periodicity values
+    r"Regional|National|International|"  # coverage values
+    r"Press.*|"  # source-type values
+    r"Newspapers|Magazines"  # standalone source-type values
+    r")\s*$",
+    re.IGNORECASE,
+)
+_EUROPRESSE_TITLE_TERMINATOR_PATTERN = re.compile(r'[.!?;:»"”]$')
+_EUROPRESSE_NAME_TOKEN_PATTERN = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ'’.-]+")
+_EUROPRESSE_PHOTO_CREDIT_PATTERN = re.compile(
+    r"\bPhoto\s+[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’.-]*"
+    r"(?:\s+[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’.-]*){0,4}\s*\.?",
+    re.IGNORECASE,
+)
 _PAYLOAD_TEXT_PREVIEW_CHARS = 500
 _FRENCH_STOPWORDS = frozenset(
     {
@@ -82,6 +170,32 @@ _FRENCH_STOPWORDS = frozenset(
         "une",
         "ville",
     }
+)
+_FRENCH_MONTH_NUMBERS = {
+    "janvier": "01",
+    "fevrier": "02",
+    "fvrier": "02",
+    "mars": "03",
+    "avril": "04",
+    "mai": "05",
+    "juin": "06",
+    "juillet": "07",
+    "aout": "08",
+    "aot": "08",
+    "septembre": "09",
+    "octobre": "10",
+    "novembre": "11",
+    "decembre": "12",
+    "dcembre": "12",
+}
+_FRENCH_WEEKDAYS = (
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
 )
 _BRONZE_SOURCE_COLUMNS = [
     "batch_id",
@@ -190,6 +304,8 @@ _DISCOVERY_COLUMNS = [
     "query_strategy",
     "partition_date",
 ]
+
+
 def _derive_rights_class(access_level: str) -> str:
     """Map batch access-level labels to the restricted/public rights contract."""
     normalized = normalize_text_for_match(access_level)
@@ -279,11 +395,45 @@ def _detect_french_language(raw_language: str, title: str, body_text: str) -> st
     return "unknown"
 
 
+def _parse_french_literal_date(value: str) -> pd.Timestamp | pd.NaT:
+    """Parse French calendar literals without depending on system locale."""
+    normalized_value = normalize_text_for_match(value)
+    date_tokens = normalized_value.split()
+    if date_tokens and date_tokens[0] in _FRENCH_WEEKDAYS:
+        date_tokens = date_tokens[1:]
+    if len(date_tokens) < 3:
+        return pd.NaT
+
+    day_token = date_tokens[0]
+    year_token = date_tokens[-1]
+    month_token = "".join(date_tokens[1:-1])
+    if not re.fullmatch(r"\d{1,2}", day_token):
+        return pd.NaT
+    if not re.fullmatch(r"\d{4}", year_token):
+        return pd.NaT
+
+    month_number = _FRENCH_MONTH_NUMBERS.get(month_token)
+    if month_number is None:
+        return pd.NaT
+
+    iso_date = f"{year_token}-{month_number}-{int(day_token):02d}"
+    return pd.to_datetime(
+        iso_date,
+        utc=True,
+        errors="coerce",
+        format="%Y-%m-%d",
+    )
+
+
 def _parse_timestamp(value: str) -> pd.Timestamp | pd.NaT:
     """Parse article timestamps with French exports in mind."""
     cleaned_value = _clean_text(value)
     if not cleaned_value:
         return pd.NaT
+
+    parsed_french_literal = _parse_french_literal_date(cleaned_value)
+    if not pd.isna(parsed_french_literal):
+        return parsed_french_literal
 
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned_value):
         parsed = pd.to_datetime(
@@ -432,21 +582,371 @@ def _extract_html_document_fields(document_text: str) -> dict[str, str]:
 
 
 def _extract_pdf_text(file_path: Path) -> str:
-    """Extract simple text-layer content from PDF bytes."""
+    """Extract text from a PDF file with line-break structure preserved.
+
+    pdfminer.six handles CIDFont/ToUnicode glyph mapping used by modern press
+    archive exports such as Europresse.  The legacy regex fallback handles older
+    PostScript-style PDFs whose text appears as ``(string) Tj`` operators.
+
+    The returned string preserves newlines so downstream callers can perform
+    line-based parsing (e.g. Europresse article segmentation).  Callers that
+    need a single-line clean string should apply ``_clean_text()`` themselves.
+
+    Args:
+        file_path: Path to the PDF file.
+
+    Returns:
+        Extracted text with newlines preserved, or empty string on failure.
+    """
+    if _PDFMINER_AVAILABLE:
+        try:
+            raw_text = _pdfminer_extract_text(str(file_path))
+            if raw_text and raw_text.strip():
+                # Normalize form-feed page separators to newlines for uniform parsing.
+                return raw_text.replace("\x0c", "\n")
+        except Exception as exc:
+            logger.warning(
+                "pdfminer failed on %s: %s — falling back to legacy regex extractor",
+                file_path.name,
+                exc,
+            )
+    # Legacy fallback: old PostScript-style PDFs with ``(string) Tj`` operators.
     pdf_bytes = file_path.read_bytes()
     extracted_chunks = [
         match.decode("latin-1", errors="ignore")
         for match in _PDF_TEXT_PATTERN.findall(pdf_bytes)
     ]
-    return _clean_text(" ".join(extracted_chunks))
+    return " ".join(extracted_chunks)
 
 
 def _pdf_has_text_layer(file_path: Path) -> bool:
-    """Detect whether a PDF likely contains extractable text operators."""
+    """Detect whether a PDF contains extractable text.
+
+    Tries pdfminer.six first (handles modern CIDFont encodings), then falls back
+    to scanning for legacy PostScript ``(string) Tj`` operators.
+
+    Args:
+        file_path: Path to the PDF file.
+
+    Returns:
+        True if any text could be extracted from the PDF.
+    """
+    if _PDFMINER_AVAILABLE:
+        try:
+            raw_text = _pdfminer_extract_text(str(file_path))
+            if raw_text and raw_text.strip():
+                return True
+            # pdfminer returned empty — fall through to the legacy check.
+        except Exception as exc:
+            logger.debug("pdfminer could not parse %s: %s", file_path.name, exc)
+    # Legacy fallback: scan for PostScript-style text operators.
     pdf_bytes = file_path.read_bytes()
     if b"/Font" not in pdf_bytes:
         return False
     return bool(_PDF_TEXT_PATTERN.search(pdf_bytes))
+
+
+def _is_europresse_format(text: str) -> bool:
+    """Detect whether extracted PDF text is a multi-article Europresse batch export.
+
+    Europresse alert PDFs (CEDROM-SNi) embed N articles per file.  Each article
+    header contains a ``• N words`` word-count line with a U+2022 bullet prefix.
+    Finding two or more such lines is a reliable signal that the PDF is a
+    batch export rather than a single document.
+
+    Args:
+        text: Raw text extracted from the PDF (newlines preserved).
+
+    Returns:
+        True if the text contains at least two Europresse word-count anchors.
+    """
+    wc_matches = _EUROPRESSE_WORD_COUNT_PATTERN.findall(text)
+    return len(wc_matches) >= 2
+
+
+def _extract_europresse_declared_document_count(full_text: str) -> int | None:
+    """Read the declared document count from the Europresse cover/summary pages."""
+    header_window = full_text[:4_000]
+    document_count_match = _EUROPRESSE_DOCUMENT_COUNT_PATTERN.search(header_window)
+    if document_count_match is None:
+        return None
+    return int(document_count_match.group(1))
+
+
+def _looks_like_europresse_byline(line: str) -> bool:
+    """Detect compact author-credit lines so they do not leak into article text."""
+    cleaned_line = _clean_text(line)
+    if not cleaned_line or cleaned_line.lower().startswith("photo "):
+        return False
+
+    raw_tokens = _EUROPRESSE_NAME_TOKEN_PATTERN.findall(cleaned_line)
+    if not 2 <= len(raw_tokens) <= 4:
+        return False
+    if any(any(character.isdigit() for character in token) for token in raw_tokens):
+        return False
+
+    connective_tokens = {"d", "de", "du", "des", "la", "le", "les"}
+    capitalized_token_count = 0
+
+    for token in raw_tokens:
+        normalized_token = normalize_text_for_match(token)
+        if not normalized_token:
+            return False
+        if normalized_token in connective_tokens:
+            continue
+        if token.isupper() or token[0].isupper():
+            capitalized_token_count += 1
+            continue
+        return False
+
+    return capitalized_token_count >= 2 and cleaned_line[-1] not in ".!?:;"
+
+
+def _looks_like_europresse_title_continuation(line: str) -> bool:
+    """Return whether a short line is likely to continue a wrapped headline."""
+    cleaned_line = _clean_text(line)
+    normalized_line = normalize_text_for_match(cleaned_line)
+    if not normalized_line or _looks_like_europresse_byline(cleaned_line):
+        return False
+
+    word_count = len(normalized_line.split())
+    if word_count > 14:
+        return False
+    if cleaned_line.lower().startswith("photo "):
+        return False
+    return not (cleaned_line.endswith(".") and word_count >= 6)
+
+
+def _clean_europresse_body_text(body_lines: list[str]) -> str:
+    """Collapse segmented body lines while removing layout-only Europresse noise."""
+    body_text = " ".join(_clean_text(line) for line in body_lines if _clean_text(line))
+    body_text = _EUROPRESSE_PHOTO_CREDIT_PATTERN.sub("", body_text)
+    # pdfminer sometimes splits drop caps into ``V illeurbanne`` or ``L e``.
+    body_text = re.sub(r"\b([A-Z])\s+([a-zà-öø-ÿ]{2,})\b", r"\1\2", body_text)
+    body_text = re.sub(r"\s+([,.;:!?»])", r"\1", body_text)
+    return _clean_text(body_text)
+
+
+def _extract_europresse_title_and_body(
+    effective_lines: list[str],
+) -> tuple[str, str]:
+    """Split Europresse content lines into a stitched title and cleaned body."""
+    if not effective_lines:
+        return "", ""
+
+    title_parts = [_clean_text(effective_lines[0])]
+    body_start_idx = 1
+
+    for line_index, line in enumerate(effective_lines[1:4], start=1):
+        if _EUROPRESSE_TITLE_TERMINATOR_PATTERN.search(title_parts[-1]):
+            break
+        if not _looks_like_europresse_title_continuation(line):
+            break
+        title_parts.append(_clean_text(line))
+        body_start_idx = line_index + 1
+
+    body_lines = effective_lines[body_start_idx:]
+    if body_lines and _looks_like_europresse_byline(body_lines[0]):
+        body_lines = body_lines[1:]
+
+    return _clean_text(" ".join(title_parts)), _clean_europresse_body_text(body_lines)
+
+
+def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
+    """Segment a multi-article Europresse batch PDF into per-article records.
+
+    CEDROM-SNi Europresse alert exports embed multiple articles per PDF.  Each
+    article has a structured header that ends with a ``• N words`` line.  Article
+    body text follows and ends at the CEDROM-SNi boilerplate footer
+    (``This document is destined for the exclusive use``).
+
+    Segmentation strategy:
+    - ``• N words`` is the anchor: everything after it (until the footer) is
+      title + author + body text.
+    - French date (with day-name prefix) in the 800 chars before the anchor
+      gives the publication date.
+    - The first non-bullet non-empty line after the date gives the outlet name.
+    - ``Page`` and page-code lines immediately after the anchor are skipped.
+    - The first 1–2 non-empty post-Page lines become the title; the rest is body.
+
+    Args:
+        full_text: Raw text extracted from a multi-article Europresse PDF,
+            with page breaks normalized to newlines.
+
+    Returns:
+        List of article dicts with keys: ``outlet``, ``published_at``,
+        ``title``, ``body_text``, ``declared_word_count``, ``article_index``.
+    """
+    wc_matches = list(_EUROPRESSE_WORD_COUNT_PATTERN.finditer(full_text))
+    if not wc_matches:
+        return []
+
+    # Pre-compute footer positions so we can do O(1) lookup per article.
+    footer_positions = [
+        m.start() for m in _EUROPRESSE_FOOTER_PATTERN.finditer(full_text)
+    ]
+
+    articles: list[dict[str, str]] = []
+
+    for art_num, wc_match in enumerate(wc_matches):
+        wc_start = wc_match.start()
+        wc_end = wc_match.end()
+        declared_word_count = wc_match.group(1)
+
+        # ── Date and outlet: scan 800 chars before the word-count anchor ─────
+        header_region = full_text[max(0, wc_start - 800) : wc_start]
+
+        # Date: last French-date occurrence in the header region (closest to anchor).
+        article_date = ""
+        last_date_end = -1
+        for date_match in _EUROPRESSE_DATE_PATTERN.finditer(header_region):
+            article_date = date_match.group(1)
+            last_date_end = date_match.end()
+
+        # Outlet: first non-empty, non-bullet line after the date in the header region.
+        # Europresse prints some outlet names across two lines:
+        #   (a) "L'intern@ute (site web) -\nL'Internaute" — trailing dash signals continuation.
+        #   (b) "France 3 Régions (site web\nréf.) - France 3 Regions" — unclosed paren.
+        # In both cases we join the next non-empty non-bullet line to produce the full name.
+        outlet = ""
+        if last_date_end >= 0:
+            after_date = header_region[last_date_end:]
+            non_empty_lines = [
+                line.strip()
+                for line in after_date.splitlines()
+                if line.strip() and not line.strip().startswith("\u2022") and len(line.strip()) > 2
+            ]
+            if non_empty_lines:
+                outlet = non_empty_lines[0]
+                needs_continuation = outlet.endswith("-") or outlet.count("(") > outlet.count(")")
+                if needs_continuation and len(non_empty_lines) > 1:
+                    outlet = f"{outlet} {non_empty_lines[1]}".strip()
+
+        # ── Title and body: everything from after the anchor to the footer ───
+        # Body ends at the first boilerplate footer that follows the anchor.
+        body_end_pos = len(full_text)
+        for fp in footer_positions:
+            if fp > wc_end:
+                body_end_pos = fp
+                break
+
+        content_text = full_text[wc_end:body_end_pos]
+        content_lines = content_text.splitlines()
+
+        # ── Skip post-anchor preamble before the article title ───────────────
+        # Europresse places several preamble blocks after the word-count anchor:
+        # (a) Page reference lines: "Page", "lyoe18", "Page lyon25".
+        # (b) Boilerplate: page headers, article IDs, CEDROM-SNi copyright.
+        # (c) Web outlet reference lines: "Actu.fr (site web réf.) - Actu (FR)".
+        #     These may wrap across two lines; the line continuing after a web-
+        #     ref line is also skipped when it is short (≤ 40 chars).
+        # (d) Metadata block: "Source name" → outlet value (up to 2 lines) →
+        #     "Source type" → value → "Periodicity" → value →
+        #     "Geographical coverage" → value → "Origin" → 1–2 value lines.
+        #     "Origin" skip count is determined by lookahead: if the next non-
+        #     empty line ends with a hyphen it spans two lines.
+        #
+        # Rule for skip_value_lines > 0: if the line is itself a metadata
+        # label, override and re-process as a label (handles outlets whose
+        # name is shorter than the reserved skip window).
+        skip_value_lines = 0  # lines to consume after a metadata label
+        outlet_continuation = 0  # remaining lines for a split web outlet ref
+        content_start_idx = 0
+
+        for i, line in enumerate(content_lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # (i) Web outlet reference continuation (short lines after a ref).
+            # outlet_continuation is set when a web-ref line is first detected.
+            if outlet_continuation > 0 and len(stripped) <= 55:
+                outlet_continuation -= 1
+                content_start_idx = i + 1
+                continue
+            outlet_continuation = 0
+
+            # (ii) Consume expected value lines after a metadata label.
+            if skip_value_lines > 0:
+                if _EUROPRESSE_METADATA_LABEL_PATTERN.match(stripped):
+                    # The label's value was shorter than reserved — reset and
+                    # fall through to process this line as a label.
+                    skip_value_lines = 0
+                else:
+                    skip_value_lines -= 1
+                    content_start_idx = i + 1
+                    # If this value line begins a web-ref that spans more lines,
+                    # set the continuation counter for subsequent fragments.
+                    if re.search(
+                        r"site\s+web", stripped, re.IGNORECASE
+                    ) or stripped.endswith("(site"):
+                        outlet_continuation = 2
+                    continue
+
+            # (iii) Page references.
+            if _EUROPRESSE_PAGE_REF_PATTERN.match(stripped):
+                content_start_idx = i + 1
+                continue
+
+            # (iv) Boilerplate and known metadata values.
+            if _EUROPRESSE_SKIP_LINE_PATTERN.match(stripped):
+                content_start_idx = i + 1
+                continue
+
+            # (v) Web outlet reference lines (single line with "site web"
+            #     or first fragment of a split line ending with "(site").
+            if re.search(r"site\s+web", stripped, re.IGNORECASE) or stripped.endswith(
+                "(site"
+            ):
+                outlet_continuation = 2  # allow up to 2 continuation lines
+                content_start_idx = i + 1
+                continue
+
+            # (vi) Metadata labels — consume their value line(s).
+            if _EUROPRESSE_METADATA_LABEL_PATTERN.match(stripped):
+                if re.match(r"^\s*Source\s+name\s*$", stripped, re.IGNORECASE):
+                    # Outlet names can span two lines; reserve 2 skip slots.
+                    skip_value_lines = 2
+                elif re.match(r"^\s*Origin\s*$", stripped, re.IGNORECASE):
+                    # Lookahead: multi-line origin ends with a trailing hyphen.
+                    skip_value_lines = 1
+                    for j in range(i + 1, min(i + 4, len(content_lines))):
+                        next_s = content_lines[j].strip()
+                        if next_s:
+                            if next_s.endswith("-"):
+                                skip_value_lines = 2
+                            break
+                else:
+                    skip_value_lines = 1
+                content_start_idx = i + 1
+                continue
+
+            # This line is article content — stop skipping preamble.
+            break
+
+        # Collect effective content lines, stripping any mid-article page
+        # references that appear at the top of continuation pages.
+        effective_lines = [
+            line.strip()
+            for line in content_lines[content_start_idx:]
+            if line.strip() and not _EUROPRESSE_PAGE_REF_PATTERN.match(line.strip())
+        ]
+
+        # Split content into a stitched headline and a cleaned body payload.
+        title, body_text = _extract_europresse_title_and_body(effective_lines)
+
+        articles.append(
+            {
+                "outlet": outlet,
+                "published_at": article_date,
+                "title": title,
+                "body_text": body_text,
+                "declared_word_count": declared_word_count,
+                "article_index": str(art_num),
+            }
+        )
+
+    return articles
 
 
 def _build_source_record(
@@ -593,6 +1093,7 @@ def inspect_import_batch(manifest: NewsImportManifest) -> ImportBatchInspection:
         "table_export": 0,
         "document_export": 0,
         "pdf_text_layer": 0,
+        "pdf_europresse_batch": 0,
         "unsupported": 0,
     }
 
@@ -615,10 +1116,19 @@ def inspect_import_batch(manifest: NewsImportManifest) -> ImportBatchInspection:
                 file_type=suffix.lstrip("."),
             )
         elif suffix in _PDF_EXTENSIONS:
-            has_text_layer = _pdf_has_text_layer(file_path)
+            # Extract text once here; reused by _is_europresse_format to avoid
+            # a second pdfminer pass during parse_import_batch.
+            pdf_text = _extract_pdf_text(file_path)
+            has_text_layer = bool(pdf_text.strip())
+            if has_text_layer and _is_europresse_format(pdf_text):
+                pdf_classification = "pdf_europresse_batch"
+            elif has_text_layer:
+                pdf_classification = "pdf_text_layer"
+            else:
+                pdf_classification = "unsupported"
             inspected = ImportBatchFile(
                 path=str(file_path),
-                classification="pdf_text_layer" if has_text_layer else "unsupported",
+                classification=pdf_classification,
                 file_type="pdf",
                 has_text_layer=has_text_layer,
                 reason="" if has_text_layer else "pdf has no detectable text layer",
@@ -787,8 +1297,61 @@ def parse_import_batch(
             )
             continue
 
+        if inspected_file.classification == "pdf_europresse_batch":
+            # One Europresse PDF → N individual article bronze rows.
+            # _extract_pdf_text preserves newlines for line-based segmentation.
+            full_pdf_text = _extract_pdf_text(file_path)
+            segmented_articles = _segment_europresse_articles(full_pdf_text)
+            declared_document_count = _extract_europresse_declared_document_count(
+                full_pdf_text
+            )
+            if declared_document_count is not None and declared_document_count != len(
+                segmented_articles
+            ):
+                raise DataQualityError(
+                    f"Europresse PDF {file_path.name} declared "
+                    f"{declared_document_count} documents but segmented "
+                    f"{len(segmented_articles)} articles"
+                )
+            logger.info(
+                "Parsed Europresse PDF %s: %d articles segmented",
+                file_path.name,
+                len(segmented_articles),
+            )
+            for article in segmented_articles:
+                article_body = _clean_text(article["body_text"])
+                article_title = _clean_text(article["title"]) or file_path.stem
+                bronze_rows.append(
+                    _build_source_record(
+                        manifest=manifest,
+                        file_path=file_path,
+                        file_type=inspected_file.file_type,
+                        classification=inspected_file.classification,
+                        local_record_key=(
+                            f"{file_path.name}:article_{article['article_index']}"
+                        ),
+                        source_native_payload={
+                            "file_name": file_path.name,
+                            "article_index": article["article_index"],
+                            "declared_word_count": article["declared_word_count"],
+                            "body_preview": article_body[:_PAYLOAD_TEXT_PREVIEW_CHARS],
+                        },
+                        raw_title=article_title,
+                        raw_body_text=article_body,
+                        raw_published_at=article["published_at"],
+                        raw_outlet=article["outlet"] or manifest.source_system,
+                        raw_article_url="",
+                        raw_author="",
+                        raw_language="",
+                        parser_name="parse_europresse_pdf_batch",
+                    )
+                )
+            continue
+
         if inspected_file.classification == "pdf_text_layer":
-            extracted_text = _extract_pdf_text(file_path)
+            # Single-document PDF: treat the whole file as one article record.
+            # _extract_pdf_text preserves newlines; _clean_text collapses to one line.
+            extracted_text = _clean_text(_extract_pdf_text(file_path))
             title = extracted_text.split(".")[0][:140].strip() or file_path.stem
             bronze_rows.append(
                 _build_source_record(
@@ -799,7 +1362,7 @@ def parse_import_batch(
                     local_record_key=file_path.name,
                     source_native_payload={
                         "file_name": file_path.name,
-                        "body_preview": extracted_text[:500],
+                        "body_preview": extracted_text[:_PAYLOAD_TEXT_PREVIEW_CHARS],
                     },
                     raw_title=title,
                     raw_body_text=extracted_text,

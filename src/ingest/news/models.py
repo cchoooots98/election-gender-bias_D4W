@@ -173,6 +173,7 @@ class ImportBatchFile:
         "table_export",
         "document_export",
         "pdf_text_layer",
+        "pdf_europresse_batch",
         "unsupported",
     ]
     file_type: str
@@ -192,7 +193,7 @@ class ImportBatchInspection:
 
 @dataclass(frozen=True)
 class NewsCorpusRunResult:
-    """Summary of one source-agnostic news corpus pipeline run."""
+    """Summary of one Europresse corpus pipeline run."""
 
     run_id: str
     batch_id: str

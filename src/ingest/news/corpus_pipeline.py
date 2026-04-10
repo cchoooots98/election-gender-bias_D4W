@@ -1,30 +1,22 @@
-"""End-to-end source-agnostic news corpus ETL pipeline.
+"""End-to-end Europresse-first news corpus ETL pipeline.
 
 Responsibility
 --------------
-This module parses a ``NewsImportManifest`` (e.g. an Europresse export), merges
-optional supplemental provider hits (GDELT / curated), deduplicates articles,
-matches candidates, and materialises all Silver and Gold analytical tables.
-
-It does NOT query provider APIs.  For that, use
-``src.ingest.news.pipeline.run_news_ingest()``.
+This module parses a ``NewsImportManifest`` for a local Europresse export,
+deduplicates canonical articles, matches sampled candidates, and materialises
+all Silver and Gold analytical tables.
 
 Typical calling sequence (from orchestration layer)
 ----------------------------------------------------
 ::
 
-    # Called by src.orchestration.news_corpus_pipeline.run_news_corpus_pipeline()
-    result = run_news_corpus_etl(
-        import_manifest_path=...,
-        supplemental_search_hits=gdelt_hits,   # optional GDELT hits
-        supplemental_provider_query_rows=...,  # paired audit rows
-    )
+    result = run_news_corpus_etl(import_manifest_path=...)
 
 Output tables
 -------------
 Bronze  : ``news_source_record``
-Silver  : ``fact_article_source``, ``fact_article``, ``fact_article_discovery``,
-          ``fact_mention``, ``manual_review_candidate_match``, ``_rejected/*``
+Silver  : ``fact_article_source``, ``fact_article``, ``fact_mention``,
+          ``manual_review_candidate_match``, ``_rejected/*``
 Gold    : ``mart_exposure_metrics``, ``mart_framing_metrics``,
           ``mart_bias_indicators``, ``mart_regression_feature_base``,
           ``mart_regression_results``
@@ -40,9 +32,7 @@ import pandas as pd
 
 from src.config.settings import BRONZE_DIR, GOLD_DIR, SILVER_DIR, WAREHOUSE_PATH
 from src.ingest.news.corpus import (
-    build_article_source_from_search_hits,
     build_fact_article,
-    build_fact_article_discovery,
     build_fact_article_source,
     inspect_import_batch,
     load_news_import_manifest,
@@ -62,7 +52,7 @@ from src.ingest.news.marts import (
     run_news_corpus_quality_checks,
 )
 from src.ingest.news.matching import build_fact_mentions
-from src.ingest.news.models import NewsCorpusRunResult, SearchHit
+from src.ingest.news.models import NewsCorpusRunResult
 from src.ingest.news.normalize import stable_md5 as _stable_md5
 
 logger = logging.getLogger(__name__)
@@ -111,9 +101,6 @@ def run_news_corpus_etl(
     silver_dir: Path = SILVER_DIR,
     gold_dir: Path = GOLD_DIR,
     duckdb_path: Path = WAREHOUSE_PATH,
-    supplemental_search_hits: list[SearchHit] | tuple[SearchHit, ...] = (),
-    supplemental_provider_query_rows: list[dict[str, object]] | None = None,
-    supplemental_article_fetch_results: dict[str, object] | None = None,
 ) -> NewsCorpusRunResult:
     """Run the enterprise news corpus ETL and materialize all main artifacts.
 
@@ -125,9 +112,6 @@ def run_news_corpus_etl(
         silver_dir: Silver output root.
         gold_dir: Gold output root.
         duckdb_path: Warehouse path.
-        supplemental_search_hits: Optional provider hits for discovery auditing.
-        supplemental_provider_query_rows: Provider audit rows paired to hits.
-        supplemental_article_fetch_results: Optional provider body-text fetch results.
 
     Returns:
         Summary object with status, row counts, and artifact paths.
@@ -139,23 +123,6 @@ def run_news_corpus_etl(
     fact_article_source_df, rejected_source_df = build_fact_article_source(
         bronze_source_df
     )
-
-    discovery_df = build_fact_article_discovery(
-        list(supplemental_search_hits),
-        provider_query_rows=supplemental_provider_query_rows,
-    )
-    supplemental_source_df = build_article_source_from_search_hits(
-        list(supplemental_search_hits),
-        article_fetch_results=supplemental_article_fetch_results,
-        batch_id=f"{manifest.batch_id}_supplemental",
-    )
-    if supplemental_source_df.empty:
-        combined_source_df = fact_article_source_df.copy()
-    else:
-        combined_source_df = pd.concat(
-            [fact_article_source_df, supplemental_source_df],
-            ignore_index=True,
-        )
 
     if not sample_leaders_path.exists():
         raise FileNotFoundError(
@@ -170,7 +137,7 @@ def run_news_corpus_etl(
 
     sample_leaders_df = pd.read_parquet(sample_leaders_path)
     dim_commune_df = pd.read_parquet(dim_commune_path)
-    fact_article_df = build_fact_article(combined_source_df)
+    fact_article_df = build_fact_article(fact_article_source_df)
     fact_mention_df, manual_review_df = build_fact_mentions(
         fact_article_df,
         sample_leaders_df,
@@ -196,7 +163,7 @@ def run_news_corpus_etl(
     )
     qa_report = run_news_corpus_quality_checks(
         sample_leaders_df=sample_leaders_df,
-        fact_article_source_df=combined_source_df,
+        fact_article_source_df=fact_article_source_df,
         fact_article_source_rejected_df=rejected_source_df,
         fact_article_df=fact_article_df,
         fact_mention_df=fact_mention_df,
@@ -209,7 +176,7 @@ def run_news_corpus_etl(
         text_column="raw_body_text",
     )
     persisted_fact_article_source_df = _prepare_persisted_text_table(
-        combined_source_df,
+        fact_article_source_df,
         text_column="body_text",
     )
     persisted_fact_article_df = _prepare_persisted_text_table(
@@ -240,12 +207,6 @@ def run_news_corpus_etl(
             silver_dir / "fact_article.parquet",
             "silver",
             "fact_article",
-        ),
-        (
-            discovery_df,
-            silver_dir / "fact_article_discovery.parquet",
-            "silver",
-            "fact_article_discovery",
         ),
         (
             fact_mention_df,
@@ -321,7 +282,7 @@ def run_news_corpus_etl(
             "parser_mix": inspection.parser_mix,
             "language_mix": {
                 str(language): int(count)
-                for language, count in combined_source_df["language"]
+                for language, count in fact_article_source_df["language"]
                 .value_counts(dropna=False)
                 .to_dict()
                 .items()
@@ -334,10 +295,9 @@ def run_news_corpus_etl(
 
     row_counts = {
         "bronze_news_source_record": int(len(persisted_bronze_source_df)),
-        "fact_article_source": int(len(combined_source_df)),
+        "fact_article_source": int(len(fact_article_source_df)),
         "fact_article_source_rejected": int(len(rejected_source_df)),
         "fact_article": int(len(fact_article_df)),
-        "fact_article_discovery": int(len(discovery_df)),
         "fact_mention": int(len(fact_mention_df)),
         "manual_review_candidate_match": int(len(manual_review_df)),
         "mart_exposure_metrics": int(len(mart_exposure_metrics_df)),

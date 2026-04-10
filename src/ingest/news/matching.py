@@ -46,6 +46,8 @@ _MANUAL_REVIEW_COLUMNS = [
     "match_score",
     "ambiguity_reason",
 ]
+
+
 def _build_candidate_profile(candidate_row: dict[str, object]) -> dict[str, object]:
     """Build one deterministic matching profile from a sampled candidate row."""
     full_name = str(candidate_row["full_name"])

@@ -1,10 +1,11 @@
-"""Silver / Gold persistence helpers for the source-agnostic news corpus.
+"""Silver / Gold persistence helpers for the Europresse corpus pipeline.
 
 Layer responsibility
 --------------------
 This module handles **Silver and Gold** writes produced by the corpus ETL
-(``corpus_pipeline.py``).  It is intentionally separate from ``storage.py``,
-which handles **Bronze** writes for raw provider search-hit artifacts.
+(``corpus_pipeline.py``). Bronze writes for raw Europresse imports happen in
+the corpus pipeline itself because the supported runnable flow now has a single
+authoritative archive source.
 
 Calling sequence
 ----------------
@@ -15,8 +16,8 @@ Calling sequence
         → corpus_storage.write_duckdb_table()    # Silver / Gold DuckDB
         → corpus_storage.write_json_report()     # QA / summary JSON
 
-Do not use these helpers for Bronze-layer provider artifacts; use
-``storage.persist_provider_query_result()`` for those instead.
+Do not use these helpers for Bronze-layer imports; the Bronze landing write is
+owned by ``corpus_pipeline.run_news_corpus_etl()``.
 """
 
 from __future__ import annotations
