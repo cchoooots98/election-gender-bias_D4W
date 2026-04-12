@@ -98,13 +98,26 @@ def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(token in text for token in tokens if token)
 
 
+def _coerce_article_text(value: object) -> str:
+    """Return a safe string for nullable article text fields."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+    return str(value)
+
+
 def _select_context_sentences(
     article_row: dict[str, object],
     candidate_profile: dict[str, object],
 ) -> list[str]:
     """Keep only the candidate-relevant 1-3 sentence windows."""
     relevant_sentences = []
-    for sentence in split_sentences(str(article_row["body_text"])):
+    body_text = _coerce_article_text(article_row.get("body_text"))
+    for sentence in split_sentences(body_text):
         normalized_sentence = normalize_text_for_match(sentence)
         if any(
             variant and variant in normalized_sentence
@@ -118,8 +131,9 @@ def _select_context_sentences(
         ):
             relevant_sentences.append(sentence.strip())
 
-    if not relevant_sentences and str(article_row["title"]).strip():
-        relevant_sentences.append(str(article_row["title"]).strip())
+    title = _coerce_article_text(article_row.get("title")).strip()
+    if not relevant_sentences and title:
+        relevant_sentences.append(title)
     return relevant_sentences[:3]
 
 
@@ -157,9 +171,21 @@ def build_fact_mentions(
     manual_review_rows: list[dict[str, object]] = []
 
     for article_row in fact_article_df.to_dict("records"):
-        title_normalized = normalize_text_for_match(str(article_row["title"]))
-        body_normalized = normalize_text_for_match(str(article_row["body_text"]))
-        combined_text = f"{title_normalized} {body_normalized}".strip()
+        title_normalized = normalize_text_for_match(
+            _coerce_article_text(article_row.get("title"))
+        )
+        body_normalized = normalize_text_for_match(
+            _coerce_article_text(article_row.get("body_text"))
+        )
+        url_normalized = normalize_text_for_match(
+            " ".join(
+                [
+                    _coerce_article_text(article_row.get("canonical_url")),
+                    _coerce_article_text(article_row.get("representative_url")),
+                ]
+            )
+        )
+        combined_text = f"{title_normalized} {body_normalized} {url_normalized}".strip()
 
         for profile in candidate_profiles:
             title_hit = any(

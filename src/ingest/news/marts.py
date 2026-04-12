@@ -8,16 +8,31 @@ from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
+from numpy.linalg import LinAlgError
 
 try:
     import statsmodels.api as sm
 except ImportError:  # pragma: no cover - depends on local environment
     sm = None
 
+try:
+    from statsmodels.tools.sm_exceptions import PerfectSeparationError
+except ImportError:  # pragma: no cover - depends on local environment
+    PerfectSeparationError = None
+
 from src.config.settings import DQ_MAX_NULL_RATE
 from src.transform._exceptions import DataQualityError
 
 logger = logging.getLogger(__name__)
+
+_REGRESSION_FIT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    FloatingPointError,
+    LinAlgError,
+    RuntimeError,
+    ValueError,
+)
+if PerfectSeparationError is not None:
+    _REGRESSION_FIT_EXCEPTIONS = _REGRESSION_FIT_EXCEPTIONS + (PerfectSeparationError,)
 
 _FRAME_LABELS = (
     "politique",
@@ -43,6 +58,9 @@ _EXPOSURE_COLUMNS = [
     "distinct_source_count",
     "restricted_source_article_count",
     "supplemental_source_article_count",
+    "full_text_article_count",
+    "metadata_only_article_count",
+    "has_full_text",
     "exposure_per_10k_population",
 ]
 _FRAMING_COLUMNS = [
@@ -194,18 +212,25 @@ def build_mart_exposure_metrics(
             "distinct_source_count",
             "restricted_source_article_count",
             "supplemental_source_article_count",
+            "full_text_article_count",
+            "metadata_only_article_count",
             "exposure_per_10k_population",
         ):
             sample_df[metric_column] = 0
+        sample_df["has_full_text"] = False
         return sample_df[_EXPOSURE_COLUMNS].copy()
 
+    article_df = fact_article_df.copy()
+    if "has_full_text" not in article_df.columns:
+        article_df["has_full_text"] = True
     mention_article_df = fact_mention_df.merge(
-        fact_article_df[
+        article_df[
             [
                 "canonical_article_id",
                 "outlet_name_normalized",
                 "rights_class",
                 "acquisition_methods",
+                "has_full_text",
             ]
         ],
         on="canonical_article_id",
@@ -220,6 +245,9 @@ def build_mart_exposure_metrics(
     mention_article_df["restricted_flag"] = (
         mention_article_df["rights_class"].fillna("") == "restricted_local"
     )
+    mention_article_df["full_text_flag"] = (
+        mention_article_df["has_full_text"].astype("boolean").fillna(False)
+    )
 
     aggregated_df = (
         mention_article_df.groupby("leader_id", dropna=False)
@@ -229,9 +257,14 @@ def build_mart_exposure_metrics(
             distinct_source_count=("outlet_name_normalized", "nunique"),
             restricted_source_article_count=("restricted_flag", "sum"),
             supplemental_source_article_count=("supplemental_flag", "sum"),
+            full_text_article_count=("full_text_flag", "sum"),
         )
         .reset_index()
     )
+    aggregated_df["metadata_only_article_count"] = (
+        aggregated_df["article_count"] - aggregated_df["full_text_article_count"]
+    )
+    aggregated_df["has_full_text"] = aggregated_df["full_text_article_count"] > 0
 
     mart_df = sample_df.merge(
         aggregated_df,
@@ -245,8 +278,13 @@ def build_mart_exposure_metrics(
         "distinct_source_count",
         "restricted_source_article_count",
         "supplemental_source_article_count",
+        "full_text_article_count",
+        "metadata_only_article_count",
     ]
     mart_df[fill_zero_columns] = mart_df[fill_zero_columns].fillna(0).astype(int)
+    mart_df["has_full_text"] = (
+        mart_df["has_full_text"].astype("boolean").fillna(False).astype(bool)
+    )
     mart_df["exposure_per_10k_population"] = np.where(
         mart_df["population"].fillna(0) > 0,
         mart_df["article_count"] / (mart_df["population"] / 10_000),
@@ -421,7 +459,7 @@ def build_mart_regression_results(
         with warnings.catch_warnings(record=True) as fit_warnings:
             warnings.simplefilter("always")
             fit_result = model.fit()
-    except Exception as exc:  # pragma: no cover - exercised by runtime failure
+    except _REGRESSION_FIT_EXCEPTIONS as exc:  # pragma: no cover
         logger.warning("Poisson regression fit failed error=%r", exc)
         return _build_unfitted_regression_rows(
             exog_df=exog_df,
@@ -469,6 +507,7 @@ def run_news_corpus_quality_checks(
     fact_mention_df: pd.DataFrame,
     mart_exposure_metrics_df: pd.DataFrame,
     mart_regression_results_df: pd.DataFrame,
+    web_enrichment_report: dict[str, int] | None = None,
 ) -> dict[str, object]:
     """Validate the main contracts before the pipeline is considered successful."""
     if fact_article_source_df.empty:
@@ -477,7 +516,6 @@ def run_news_corpus_quality_checks(
     critical_source_columns = [
         "article_source_id",
         "title_normalized",
-        "body_text_hash",
         "published_at_normalized",
         "outlet_name_normalized",
         "language",
@@ -495,6 +533,17 @@ def run_news_corpus_quality_checks(
                 for column_name, null_count in sorted(null_violations.items())
             )
         )
+
+    if "has_full_text" in fact_article_source_df.columns:
+        full_text_source_df = fact_article_source_df[
+            fact_article_source_df["has_full_text"].astype("boolean").fillna(False)
+        ]
+        if full_text_source_df["body_text_hash"].isna().sum() > 0:
+            raise DataQualityError(
+                "fact_article_source contains full-text rows with null body_text_hash"
+            )
+    elif fact_article_source_df["body_text_hash"].isna().sum() > 0:
+        raise DataQualityError("fact_article_source contains null body_text_hash")
 
     non_french_rows = int((fact_article_source_df["language"] != "fr").sum())
     if non_french_rows > 0:
@@ -557,7 +606,7 @@ def run_news_corpus_quality_checks(
         }
     )
 
-    return {
+    report = {
         "accepted_article_source_count": int(len(fact_article_source_df)),
         "rejected_article_source_count": int(len(fact_article_source_rejected_df)),
         "canonical_article_count": int(len(fact_article_df)),
@@ -572,3 +621,14 @@ def run_news_corpus_quality_checks(
         "regression_warning_count": len(regression_warning_statuses),
         "regression_failure_count": len(regression_failure_statuses),
     }
+    report.update(
+        web_enrichment_report
+        or {
+            "web_scrape_queued_count": 0,
+            "web_scrape_cache_hit_count": 0,
+            "web_scrape_success_count": 0,
+            "url_metadata_only_count": 0,
+            "web_scrape_failure_count": 0,
+        }
+    )
+    return report

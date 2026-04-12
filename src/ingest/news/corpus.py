@@ -13,7 +13,9 @@ import logging
 import re
 from datetime import UTC, date, datetime
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import pandas as pd
 
@@ -29,12 +31,28 @@ except ImportError:  # pragma: no cover - depends on local environment
 
 try:
     from pdfminer.high_level import extract_text as _pdfminer_extract_text
+    from pdfminer.pdfparser import PDFException
+    from pdfminer.psparser import PSException
 
     _PDFMINER_AVAILABLE = True
+    _PDFMINER_EXCEPTIONS: tuple[type[BaseException], ...] = (
+        PDFException,
+        PSException,
+        OSError,
+        UnicodeError,
+        ValueError,
+    )
 except ImportError:  # pragma: no cover - optional dependency; install pdfminer-six
     _PDFMINER_AVAILABLE = False
+    _PDFMINER_EXCEPTIONS = (OSError, UnicodeError, ValueError)
 
-from src.config.settings import DQ_MAX_NULL_RATE, DQ_MIN_ARTICLE_TEXT_LENGTH
+from src.config.settings import (
+    ANALYSIS_END_DATE,
+    ANALYSIS_START_DATE,
+    DQ_MAX_NULL_RATE,
+    DQ_MIN_ARTICLE_TEXT_LENGTH,
+    SCRAPE_REQUEST_TIMEOUT_SECONDS,
+)
 from src.ingest.news.models import (
     ArticleFetchResult,
     ImportBatchFile,
@@ -55,6 +73,8 @@ from src.transform._exceptions import DataQualityError
 logger = logging.getLogger(__name__)
 
 _PARSER_VERSION = "news_corpus_v1"
+_DEFAULT_ANALYSIS_WINDOW_START = date.fromisoformat(ANALYSIS_START_DATE)
+_DEFAULT_ANALYSIS_WINDOW_END = date.fromisoformat(ANALYSIS_END_DATE)
 _TABLE_EXTENSIONS = {".csv", ".xlsx"}
 _DOCUMENT_EXTENSIONS = {".html", ".htm", ".txt"}
 _PDF_EXTENSIONS = {".pdf"}
@@ -62,6 +82,13 @@ _SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[.!?])\s+|\n+")
 # Legacy PostScript text operator — only matches old-style PDFs; modern CIDFont
 # PDFs (e.g. Europresse exports) use Unicode-mapped hex streams invisible to this regex.
 _PDF_TEXT_PATTERN = re.compile(rb"\(([^()]*)\)\s*Tj")
+_HTTP_URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
+_HTTP_URL_WITH_COMMON_SUFFIX_PATTERN = re.compile(
+    r"https?://.+?\.(?:html?|php|aspx?)(?:[?#][^<>\s\"']*)?",
+    re.IGNORECASE,
+)
+_HTTP_URL_FALLBACK_PATTERN = re.compile(r"https?://[^<>\s\"']+", re.IGNORECASE)
+_HTTP_URL_CONTINUATION_PATTERN = re.compile(r"^[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+$")
 # ── Europresse batch-PDF article structure ────────────────────────────────────
 # CEDROM-SNi Europresse exports embed multiple articles per PDF.  pdfminer maps
 # the copyright bullet (•, U+2022) that Europresse uses as a prefix for metadata
@@ -78,17 +105,22 @@ _PDF_TEXT_PATTERN = re.compile(rb"\(([^()]*)\)\s*Tj")
 #
 # After the anchor: Page/code reference lines, then title, author, body text.
 # Body ends at the CEDROM-SNi boilerplate footer: "This document is destined…".
-_EUROPRESSE_WORD_COUNT_PATTERN = re.compile(r"\u2022\s+(\d+)\s+words")
+_EUROPRESSE_WORD_COUNT_PATTERN = re.compile(
+    r"(?:\u2022|\u00e2\u20ac\u00a2)\s+(\d+)\s+words"
+)
 _EUROPRESSE_DOCUMENT_COUNT_PATTERN = re.compile(
-    r"\b(\d+)\s+documents\b",
+    r"\b(\d+)\s+documents?\b",
     re.IGNORECASE,
 )
-# Day-name prefix is optional: print editions include it ("Dimanche 9 novembre
-# 2025"), web editions omit it ("23 mars 2026").
+# Day-name prefix is optional. Some Europresse web-reference headers localize
+# the UI date in English even when the article body is French.
 _EUROPRESSE_DATE_PATTERN = re.compile(
     r"(?:(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\s+)?"
     r"(\d{1,2}\s+(?:janvier|f[eé]vrier|mars|avril|mai|juin|juillet|ao[uû]t"
-    r"|septembre|octobre|novembre|d[eé]cembre)\s+\d{4})",
+    r"|septembre|octobre|novembre|d[eé]cembre)\s+\d{4})"
+    r"|(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
+    r"((?:January|February|March|April|May|June|July|August|September|October"
+    r"|November|December)\s+\d{1,2},?\s+\d{4})",
     re.IGNORECASE,
 )
 _EUROPRESSE_FOOTER_PATTERN = re.compile(
@@ -117,6 +149,7 @@ _EUROPRESSE_SKIP_LINE_PATTERN = re.compile(
     r"^\s*(?:"
     r"Saved\s+documents.*|"  # page header: "Saved documents by…"
     r"(?:news|web)\W.*\d{8}.*|"  # article ID: "news•20251109•PR•…"
+    r".*Tous\s+droits\s+r\S*serv\S*s.*|"  # copyright line
     r"The\s+present\s+document.*|"  # CEDROM-SNi copyright sentence (line 1)
     r"protected\s+under.*|"  # copyright sentence (line 2)
     r"and\s+conventions[.;]?\s*|"  # copyright sentence (line 3)
@@ -140,6 +173,11 @@ _EUROPRESSE_PHOTO_CREDIT_PATTERN = re.compile(
     r"\bPhoto\s+[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’.-]*"
     r"(?:\s+[A-ZÀ-ÖØ-Þ][\wÀ-ÖØ-öø-ÿ'’.-]*){0,4}\s*\.?",
     re.IGNORECASE,
+)
+_EUROPRESSE_SEGMENT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    IndexError,
+    TypeError,
+    ValueError,
 )
 _PAYLOAD_TEXT_PREVIEW_CHARS = 500
 _FRENCH_STOPWORDS = frozenset(
@@ -240,6 +278,7 @@ _FACT_ARTICLE_SOURCE_COLUMNS = [
     "title_normalized",
     "body_text",
     "body_text_hash",
+    "has_full_text",
     "published_at_normalized",
     "published_date",
     "outlet_name",
@@ -270,6 +309,7 @@ _FACT_ARTICLE_COLUMNS = [
     "title_normalized",
     "body_text",
     "body_text_hash",
+    "has_full_text",
     "published_at",
     "published_date",
     "domain",
@@ -282,6 +322,20 @@ _FACT_ARTICLE_COLUMNS = [
     "source_systems",
     "acquisition_methods",
     "partition_date",
+]
+_WEB_FETCH_CACHE_COLUMNS = [
+    "canonical_url",
+    "source_url",
+    "fetch_status",
+    "http_status",
+    "body_text",
+    "body_text_hash",
+    "body_text_preview",
+    "body_text_length",
+    "fetched_at",
+    "extractor_name",
+    "extractor_version",
+    "error_type",
 ]
 _DISCOVERY_COLUMNS = [
     "discovery_id",
@@ -331,7 +385,14 @@ def _clean_text(value: str) -> str:
 
 def _coerce_optional_str(value: object) -> str:
     """Convert nullable scalars into a safe string for JSON and Parquet outputs."""
-    if value is None or pd.isna(value):
+    if value is None:
+        return ""
+    if isinstance(value, list | tuple | set | dict):
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
         return ""
     return str(value)
 
@@ -581,6 +642,63 @@ def _extract_html_document_fields(document_text: str) -> dict[str, str]:
     }
 
 
+def _trim_extracted_url(raw_url: str) -> str:
+    """Return a cleaned URL extracted from wrapped PDF text."""
+    compact_url = re.sub(r"\s+", "", raw_url)
+    common_suffix_match = _HTTP_URL_WITH_COMMON_SUFFIX_PATTERN.search(compact_url)
+    if common_suffix_match is not None:
+        return common_suffix_match.group(0).rstrip(".,);:]")
+    fallback_match = _HTTP_URL_FALLBACK_PATTERN.search(compact_url)
+    if fallback_match is None:
+        return ""
+    return fallback_match.group(0).rstrip(".,);:]")
+
+
+def _extract_first_url_from_lines(lines: list[str]) -> str:
+    """Extract the first URL from Europresse lines with PDF line wrapping."""
+    for line_index, line in enumerate(lines):
+        if _HTTP_URL_PATTERN.search(line) is None:
+            continue
+
+        fragments: list[str] = []
+        for candidate_line in lines[line_index : line_index + 24]:
+            stripped_line = candidate_line.strip()
+            if not stripped_line:
+                continue
+            if fragments and re.match(
+                r"^(This document|Web-?sites|are not hosted|Page\s|Source\s)",
+                stripped_line,
+                re.IGNORECASE,
+            ):
+                break
+            if not fragments:
+                url_start = _HTTP_URL_PATTERN.search(stripped_line)
+                if url_start is None:
+                    continue
+                stripped_line = stripped_line[url_start.start() :]
+            elif _HTTP_URL_CONTINUATION_PATTERN.fullmatch(stripped_line) is None:
+                break
+            fragments.append(stripped_line)
+
+            candidate_url = _trim_extracted_url("".join(fragments))
+            if candidate_url and re.search(
+                r"\.(?:html?|php|aspx?)(?:[?#].*)?$",
+                candidate_url,
+                re.IGNORECASE,
+            ):
+                return candidate_url
+
+        candidate_url = _trim_extracted_url("".join(fragments))
+        if candidate_url:
+            return candidate_url
+    return ""
+
+
+def _extract_first_url_from_text(text: str) -> str:
+    """Extract a URL from one-line or line-preserving article text."""
+    return _extract_first_url_from_lines(str(text or "").splitlines())
+
+
 def _extract_pdf_text(file_path: Path) -> str:
     """Extract text from a PDF file with line-break structure preserved.
 
@@ -604,7 +722,7 @@ def _extract_pdf_text(file_path: Path) -> str:
             if raw_text and raw_text.strip():
                 # Normalize form-feed page separators to newlines for uniform parsing.
                 return raw_text.replace("\x0c", "\n")
-        except Exception as exc:
+        except _PDFMINER_EXCEPTIONS as exc:
             logger.warning(
                 "pdfminer failed on %s: %s — falling back to legacy regex extractor",
                 file_path.name,
@@ -637,7 +755,7 @@ def _pdf_has_text_layer(file_path: Path) -> bool:
             if raw_text and raw_text.strip():
                 return True
             # pdfminer returned empty — fall through to the legacy check.
-        except Exception as exc:
+        except _PDFMINER_EXCEPTIONS as exc:
             logger.debug("pdfminer could not parse %s: %s", file_path.name, exc)
     # Legacy fallback: scan for PostScript-style text operators.
     pdf_bytes = file_path.read_bytes()
@@ -647,21 +765,32 @@ def _pdf_has_text_layer(file_path: Path) -> bool:
 
 
 def _is_europresse_format(text: str) -> bool:
-    """Detect whether extracted PDF text is a multi-article Europresse batch export.
+    """Detect whether extracted PDF text is a structured Europresse export.
 
-    Europresse alert PDFs (CEDROM-SNi) embed N articles per file.  Each article
+    Europresse alert PDFs (CEDROM-SNi) embed one or many articles per file.  Each article
     header contains a ``• N words`` word-count line with a U+2022 bullet prefix.
-    Finding two or more such lines is a reliable signal that the PDF is a
-    batch export rather than a single document.
+    The full segmenter must recover a dated article so arbitrary PDFs with a
+    coincidental word-count bullet are not misclassified.
 
     Args:
         text: Raw text extracted from the PDF (newlines preserved).
 
     Returns:
-        True if the text contains at least two Europresse word-count anchors.
+        True if the segmenter recovers at least one article with structured
+        Europresse content.
     """
-    wc_matches = _EUROPRESSE_WORD_COUNT_PATTERN.findall(text)
-    return len(wc_matches) >= 2
+    articles = _segment_europresse_articles(text)
+    if any(
+        article.get("published_at")
+        and article.get("title")
+        and article.get("declared_word_count")
+        for article in articles
+    ):
+        return True
+    return len(articles) >= 2 and all(
+        article.get("title") and article.get("declared_word_count")
+        for article in articles
+    )
 
 
 def _extract_europresse_declared_document_count(full_text: str) -> int | None:
@@ -671,6 +800,14 @@ def _extract_europresse_declared_document_count(full_text: str) -> int | None:
     if document_count_match is None:
         return None
     return int(document_count_match.group(1))
+
+
+def _extract_europresse_date_literal(date_match: re.Match[str]) -> str:
+    """Return the localized Europresse date literal captured by a regex match."""
+    for matched_group in date_match.groups():
+        if matched_group:
+            return matched_group
+    return ""
 
 
 def _looks_like_europresse_byline(line: str) -> bool:
@@ -752,6 +889,25 @@ def _extract_europresse_title_and_body(
     return _clean_text(" ".join(title_parts)), _clean_europresse_body_text(body_lines)
 
 
+def _build_europresse_parse_error_article(
+    *,
+    article_index: int,
+    declared_word_count: str,
+    error: BaseException,
+) -> dict[str, str]:
+    """Build a quarantinable row when one Europresse article segment fails."""
+    return {
+        "outlet": "",
+        "published_at": "",
+        "title": "",
+        "body_text": "",
+        "article_url": "",
+        "declared_word_count": declared_word_count,
+        "article_index": str(article_index),
+        "parse_error": type(error).__name__,
+    }
+
+
 def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
     """Segment a multi-article Europresse batch PDF into per-article records.
 
@@ -763,8 +919,8 @@ def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
     Segmentation strategy:
     - ``• N words`` is the anchor: everything after it (until the footer) is
       title + author + body text.
-    - French date (with day-name prefix) in the 800 chars before the anchor
-      gives the publication date.
+    - French or English UI date (with day-name prefix) in the 800 chars before
+      the anchor gives the publication date.
     - The first non-bullet non-empty line after the date gives the outlet name.
     - ``Page`` and page-code lines immediately after the anchor are skipped.
     - The first 1–2 non-empty post-Page lines become the title; the rest is body.
@@ -775,7 +931,8 @@ def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
 
     Returns:
         List of article dicts with keys: ``outlet``, ``published_at``,
-        ``title``, ``body_text``, ``declared_word_count``, ``article_index``.
+        ``title``, ``body_text``, ``article_url``, ``declared_word_count``,
+        ``article_index``.
     """
     wc_matches = list(_EUROPRESSE_WORD_COUNT_PATTERN.finditer(full_text))
     if not wc_matches:
@@ -800,7 +957,7 @@ def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
         article_date = ""
         last_date_end = -1
         for date_match in _EUROPRESSE_DATE_PATTERN.finditer(header_region):
-            article_date = date_match.group(1)
+            article_date = _extract_europresse_date_literal(date_match)
             last_date_end = date_match.end()
 
         # Outlet: first non-empty, non-bullet line after the date in the header region.
@@ -814,11 +971,15 @@ def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
             non_empty_lines = [
                 line.strip()
                 for line in after_date.splitlines()
-                if line.strip() and not line.strip().startswith("\u2022") and len(line.strip()) > 2
+                if line.strip()
+                and not line.strip().startswith("\u2022")
+                and len(line.strip()) > 2
             ]
             if non_empty_lines:
                 outlet = non_empty_lines[0]
-                needs_continuation = outlet.endswith("-") or outlet.count("(") > outlet.count(")")
+                needs_continuation = outlet.endswith("-") or outlet.count(
+                    "("
+                ) > outlet.count(")")
                 if needs_continuation and len(non_empty_lines) > 1:
                     outlet = f"{outlet} {non_empty_lines[1]}".strip()
 
@@ -832,6 +993,22 @@ def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
 
         content_text = full_text[wc_end:body_end_pos]
         content_lines = content_text.splitlines()
+        try:
+            article_url = _extract_first_url_from_lines(content_lines)
+        except _EUROPRESSE_SEGMENT_EXCEPTIONS as exc:
+            logger.warning(
+                "Failed to extract Europresse article URL article_index=%s error=%s",
+                art_num,
+                type(exc).__name__,
+            )
+            articles.append(
+                _build_europresse_parse_error_article(
+                    article_index=art_num,
+                    declared_word_count=declared_word_count,
+                    error=exc,
+                )
+            )
+            continue
 
         # ── Skip post-anchor preamble before the article title ───────────────
         # Europresse places several preamble blocks after the word-count anchor:
@@ -933,7 +1110,22 @@ def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
         ]
 
         # Split content into a stitched headline and a cleaned body payload.
-        title, body_text = _extract_europresse_title_and_body(effective_lines)
+        try:
+            title, body_text = _extract_europresse_title_and_body(effective_lines)
+        except _EUROPRESSE_SEGMENT_EXCEPTIONS as exc:
+            logger.warning(
+                "Failed to parse Europresse article body article_index=%s error=%s",
+                art_num,
+                type(exc).__name__,
+            )
+            articles.append(
+                _build_europresse_parse_error_article(
+                    article_index=art_num,
+                    declared_word_count=declared_word_count,
+                    error=exc,
+                )
+            )
+            continue
 
         articles.append(
             {
@@ -941,6 +1133,7 @@ def _segment_europresse_articles(full_text: str) -> list[dict[str, str]]:
                 "published_at": article_date,
                 "title": title,
                 "body_text": body_text,
+                "article_url": article_url,
                 "declared_word_count": declared_word_count,
                 "article_index": str(art_num),
             }
@@ -1334,13 +1527,14 @@ def parse_import_batch(
                             "file_name": file_path.name,
                             "article_index": article["article_index"],
                             "declared_word_count": article["declared_word_count"],
+                            "parse_error": article.get("parse_error", ""),
                             "body_preview": article_body[:_PAYLOAD_TEXT_PREVIEW_CHARS],
                         },
                         raw_title=article_title,
                         raw_body_text=article_body,
                         raw_published_at=article["published_at"],
                         raw_outlet=article["outlet"] or manifest.source_system,
-                        raw_article_url="",
+                        raw_article_url=article.get("article_url", ""),
                         raw_author="",
                         raw_language="",
                         parser_name="parse_europresse_pdf_batch",
@@ -1402,17 +1596,331 @@ def parse_import_batch(
     return bronze_df, unsupported_df
 
 
+def _looks_like_web_reference_stub(
+    *,
+    body_text: str,
+    article_url: str,
+    outlet_name: str,
+) -> bool:
+    """Return whether a Europresse row points to web text rather than containing it."""
+    if not article_url:
+        return False
+    normalized_body = normalize_text_for_match(body_text)
+    normalized_outlet = normalize_text_for_match(outlet_name)
+    return "read more" in normalized_body and (
+        "this document contains links" in normalized_body
+        or "web sites" in normalized_body
+        or "site web ref" in normalized_outlet
+    )
+
+
+def _empty_web_fetch_cache() -> pd.DataFrame:
+    """Return an empty cache frame with the documented web-fetch schema."""
+    return pd.DataFrame(columns=_WEB_FETCH_CACHE_COLUMNS)
+
+
+def load_news_web_fetch_cache(cache_path: Path) -> pd.DataFrame:
+    """Load the local web-fetch cache, returning an empty frame when absent.
+
+    Args:
+        cache_path: Local Parquet path for the ignored web-fetch cache.
+
+    Returns:
+        Cache DataFrame using the documented web-fetch schema.
+    """
+    if not cache_path.exists():
+        return _empty_web_fetch_cache()
+    cache_df = pd.read_parquet(cache_path)
+    for column_name in _WEB_FETCH_CACHE_COLUMNS:
+        if column_name not in cache_df.columns:
+            cache_df[column_name] = None
+    return cache_df[_WEB_FETCH_CACHE_COLUMNS].copy()
+
+
+def write_news_web_fetch_cache(cache_df: pd.DataFrame, cache_path: Path) -> Path:
+    """Persist the local web-fetch cache in the ignored data directory.
+
+    Args:
+        cache_df: Cache rows using the documented web-fetch schema.
+        cache_path: Local Parquet path for the ignored web-fetch cache.
+
+    Returns:
+        Path where the cache was written.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_df[_WEB_FETCH_CACHE_COLUMNS].to_parquet(cache_path, index=False)
+    return cache_path
+
+
+def _build_web_fetch_cache_row(
+    *,
+    canonical_url: str,
+    source_url: str,
+    fetch_status: str,
+    http_status: int | None,
+    body_text: str,
+    error_type: str | None,
+) -> dict[str, object]:
+    """Build one cache row for a web-fetch attempt."""
+    cleaned_body = _clean_text(body_text)
+    return {
+        "canonical_url": canonical_url,
+        "source_url": source_url,
+        "fetch_status": fetch_status,
+        "http_status": http_status,
+        "body_text": cleaned_body or None,
+        "body_text_hash": _stable_md5(cleaned_body) if cleaned_body else None,
+        "body_text_preview": cleaned_body[:_PAYLOAD_TEXT_PREVIEW_CHARS] or None,
+        "body_text_length": len(cleaned_body),
+        "fetched_at": now_iso_utc(),
+        "extractor_name": "trafilatura",
+        "extractor_version": getattr(trafilatura, "__version__", None),
+        "error_type": error_type,
+    }
+
+
+def _fetch_web_article(cache_key: str, source_url: str) -> dict[str, object]:
+    """Fetch and extract one web article with explicit failure metadata."""
+    if trafilatura is None:
+        return _build_web_fetch_cache_row(
+            canonical_url=cache_key,
+            source_url=source_url,
+            fetch_status="failed",
+            http_status=None,
+            body_text="",
+            error_type="missing_trafilatura",
+        )
+
+    request = Request(
+        source_url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; research-etl/1.0)"},
+    )
+    try:
+        with urlopen(request, timeout=SCRAPE_REQUEST_TIMEOUT_SECONDS) as response:
+            http_status = getattr(response, "status", None)
+            charset = response.headers.get_content_charset() or "utf-8"
+            html_text = response.read().decode(charset, errors="replace")
+    except HTTPError as exc:
+        return _build_web_fetch_cache_row(
+            canonical_url=cache_key,
+            source_url=source_url,
+            fetch_status="failed",
+            http_status=exc.code,
+            body_text="",
+            error_type=f"http_{exc.code}",
+        )
+    except (OSError, URLError, UnicodeError) as exc:
+        return _build_web_fetch_cache_row(
+            canonical_url=cache_key,
+            source_url=source_url,
+            fetch_status="failed",
+            http_status=None,
+            body_text="",
+            error_type=type(exc).__name__,
+        )
+
+    extracted_text = trafilatura.extract(
+        html_text,
+        include_comments=False,
+        include_tables=False,
+        favor_precision=True,
+    )
+    cleaned_text = _clean_text(extracted_text or "")
+    if len(cleaned_text) < DQ_MIN_ARTICLE_TEXT_LENGTH:
+        return _build_web_fetch_cache_row(
+            canonical_url=cache_key,
+            source_url=source_url,
+            fetch_status="short_text",
+            http_status=http_status,
+            body_text=cleaned_text,
+            error_type="body_text_too_short",
+        )
+    return _build_web_fetch_cache_row(
+        canonical_url=cache_key,
+        source_url=source_url,
+        fetch_status="success",
+        http_status=http_status,
+        body_text=cleaned_text,
+        error_type=None,
+    )
+
+
+def _has_usable_cached_body(cache_row: pd.Series) -> bool:
+    """Return whether a cached row can support offline full-text reuse."""
+    return (
+        str(cache_row.get("fetch_status") or "") == "success"
+        and int(cache_row.get("body_text_length") or 0) >= DQ_MIN_ARTICLE_TEXT_LENGTH
+        and bool(_clean_text(_coerce_optional_str(cache_row.get("body_text"))))
+    )
+
+
+def _apply_web_body_to_source_row(
+    fact_article_source_df: pd.DataFrame,
+    row_index: int,
+    body_text: str,
+    *,
+    acquisition_method: str,
+) -> None:
+    """Mutate one article-source row with a full-text web extraction."""
+    cleaned_body = _clean_text(body_text)
+    fact_article_source_df.at[row_index, "body_text"] = cleaned_body
+    fact_article_source_df.at[row_index, "body_text_hash"] = _stable_md5(cleaned_body)
+    fact_article_source_df.at[row_index, "has_full_text"] = True
+    fact_article_source_df.at[row_index, "acquisition_method"] = acquisition_method
+    fact_article_source_df.at[row_index, "parser_status"] = "parsed"
+
+
+def _apply_metadata_only_to_source_row(
+    fact_article_source_df: pd.DataFrame,
+    row_index: int,
+) -> None:
+    """Mutate one article-source row into a metadata-only web reference."""
+    fact_article_source_df.at[row_index, "body_text"] = None
+    fact_article_source_df.at[row_index, "body_text_hash"] = None
+    fact_article_source_df.at[row_index, "has_full_text"] = False
+    fact_article_source_df.at[row_index, "acquisition_method"] = "url_metadata_only"
+    fact_article_source_df.at[row_index, "parser_status"] = "metadata_only"
+
+
+def enrich_article_sources_with_web_cache(
+    fact_article_source_df: pd.DataFrame,
+    *,
+    cache_path: Path,
+    enable_web_scrape: bool = False,
+) -> tuple[pd.DataFrame, dict[str, int], bool]:
+    """Reuse cached web extractions and optionally fetch missing web bodies.
+
+    Args:
+        fact_article_source_df: Silver article-source rows after PDF parsing.
+        cache_path: Local ignored Parquet cache for web fetch results.
+        enable_web_scrape: Whether this run may perform new network fetches.
+
+    Returns:
+        Tuple of enriched rows, QA metrics, and whether the cache was written.
+    """
+    enriched_df = fact_article_source_df.copy()
+    if enriched_df.empty:
+        return (
+            enriched_df,
+            {
+                "web_scrape_queued_count": 0,
+                "web_scrape_cache_hit_count": 0,
+                "web_scrape_success_count": 0,
+                "url_metadata_only_count": 0,
+                "web_scrape_failure_count": 0,
+            },
+            False,
+        )
+
+    metrics = {
+        "web_scrape_queued_count": 0,
+        "web_scrape_cache_hit_count": 0,
+        "web_scrape_success_count": 0,
+        "url_metadata_only_count": 0,
+        "web_scrape_failure_count": 0,
+    }
+    cache_df = load_news_web_fetch_cache(cache_path)
+    cache_lookup = {
+        str(row["canonical_url"]): row
+        for _, row in cache_df.drop_duplicates(
+            subset=["canonical_url"],
+            keep="last",
+        ).iterrows()
+        if _clean_text(_coerce_optional_str(row.get("canonical_url")))
+    }
+    new_cache_rows: list[dict[str, object]] = []
+
+    for row_index, row in enriched_df.iterrows():
+        article_url = _clean_text(_coerce_optional_str(row.get("article_url")))
+        canonical_url = _clean_text(_coerce_optional_str(row.get("canonical_url")))
+        if not article_url or not canonical_url:
+            continue
+        if bool(row.get("has_full_text", True)):
+            continue
+
+        metrics["web_scrape_queued_count"] += 1
+        cached_row = cache_lookup.get(canonical_url)
+        if cached_row is not None and _has_usable_cached_body(cached_row):
+            _apply_web_body_to_source_row(
+                enriched_df,
+                row_index,
+                _coerce_optional_str(cached_row.get("body_text")),
+                acquisition_method="web_scrape",
+            )
+            metrics["web_scrape_cache_hit_count"] += 1
+            continue
+
+        if enable_web_scrape:
+            fetched_row = _fetch_web_article(canonical_url, article_url)
+            cache_lookup[canonical_url] = pd.Series(fetched_row)
+            new_cache_rows.append(fetched_row)
+            if (
+                fetched_row["fetch_status"] == "success"
+                and int(fetched_row["body_text_length"]) >= DQ_MIN_ARTICLE_TEXT_LENGTH
+            ):
+                _apply_web_body_to_source_row(
+                    enriched_df,
+                    row_index,
+                    _coerce_optional_str(fetched_row["body_text"]),
+                    acquisition_method="web_scrape",
+                )
+                metrics["web_scrape_success_count"] += 1
+            else:
+                _apply_metadata_only_to_source_row(enriched_df, row_index)
+                metrics["web_scrape_failure_count"] += 1
+                metrics["url_metadata_only_count"] += 1
+            continue
+
+        _apply_metadata_only_to_source_row(enriched_df, row_index)
+        metrics["url_metadata_only_count"] += 1
+
+    cache_written = False
+    if new_cache_rows:
+        merged_cache_df = pd.DataFrame(
+            cache_df.to_dict("records") + new_cache_rows,
+            columns=_WEB_FETCH_CACHE_COLUMNS,
+        )
+        merged_cache_df = merged_cache_df.drop_duplicates(
+            subset=["canonical_url"],
+            keep="last",
+        )
+        write_news_web_fetch_cache(merged_cache_df, cache_path)
+        cache_written = True
+
+    return enriched_df, metrics, cache_written
+
+
 def build_fact_article_source(
     bronze_news_source_record_df: pd.DataFrame,
+    *,
+    window_start: date | None = _DEFAULT_ANALYSIS_WINDOW_START,
+    window_end: date | None = _DEFAULT_ANALYSIS_WINDOW_END,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Normalize bronze source records into silver-ready article-source rows.
 
+    Articles whose publication date falls outside ``[window_start, window_end]``
+    are quarantined to the rejected table with reason
+    ``"published_date outside analysis window"``.  This enforces the project's
+    analysis scope contract at the silver boundary.
+
+    Bronze records are never modified: the window filter is applied here, not
+    upstream, so the bronze layer always retains the full raw extract. The
+    analysis window is required at this Silver boundary; omitting it is a
+    contract violation because it changes the study denominator.
+
     Args:
         bronze_news_source_record_df: Parsed bronze source records.
+        window_start: Inclusive lower bound for ``published_date``.
+            Defaults to the configured project analysis start date.
+        window_end: Inclusive upper bound for ``published_date``.
+            Defaults to the configured project analysis end date.
 
     Returns:
         Tuple of ``(fact_article_source_df, rejected_df)``.
     """
+    if window_start is None or window_end is None:
+        raise ValueError("window_start and window_end are required for source DQ")
+
     if bronze_news_source_record_df.empty:
         return (
             pd.DataFrame(columns=_FACT_ARTICLE_SOURCE_COLUMNS),
@@ -1431,18 +1939,38 @@ def build_fact_article_source(
             or _coerce_optional_str(row["source_system"])
         )
         article_url = _clean_text(_coerce_optional_str(row["raw_article_url"]))
+        if not article_url:
+            article_url = _extract_first_url_from_text(body_text)
         canonical_url = canonicalize_url(article_url) if article_url else None
         language = _detect_french_language(
             _coerce_optional_str(row["raw_language"]),
             title,
             body_text,
         )
+        is_web_reference_stub = _looks_like_web_reference_stub(
+            body_text=body_text,
+            article_url=article_url,
+            outlet_name=outlet_name,
+        )
+        has_full_text = (
+            len(body_text) >= DQ_MIN_ARTICLE_TEXT_LENGTH and not is_web_reference_stub
+        )
+        body_text_too_short_without_url = (
+            len(body_text) < DQ_MIN_ARTICLE_TEXT_LENGTH and not article_url
+        )
 
         rejection_reasons = []
-        if len(body_text) < DQ_MIN_ARTICLE_TEXT_LENGTH:
+        if body_text_too_short_without_url:
             rejection_reasons.append("body_text too short")
         if published_at is pd.NaT:
             rejection_reasons.append("published_at unparseable")
+        elif (window_start is not None and published_at.date() < window_start) or (
+            window_end is not None and published_at.date() > window_end
+        ):
+            rejection_reasons.append(
+                f"published_date {published_at.date()} outside analysis window "
+                f"[{window_start}, {window_end}]"
+            )
         if language != "fr":
             rejection_reasons.append("language is not French")
         if not normalize_text_for_match(title):
@@ -1464,6 +1992,19 @@ def build_fact_article_source(
             )
             continue
 
+        persisted_body_text = body_text if has_full_text else None
+        persisted_body_text_hash = _stable_md5(body_text) if has_full_text else None
+        acquisition_method = (
+            "url_metadata_only"
+            if not has_full_text
+            else (
+                "restricted_export"
+                if row["rights_class"] == "restricted_local"
+                else "supplemental_import"
+            )
+        )
+        parser_status = "parsed" if has_full_text else "metadata_only"
+
         normalized_rows.append(
             {
                 "article_source_id": row["source_record_id"],
@@ -1473,8 +2014,9 @@ def build_fact_article_source(
                 "source_record_hash": row["source_record_hash"],
                 "title": title,
                 "title_normalized": normalize_text_for_match(title),
-                "body_text": body_text,
-                "body_text_hash": _stable_md5(body_text),
+                "body_text": persisted_body_text,
+                "body_text_hash": persisted_body_text_hash,
+                "has_full_text": has_full_text,
                 "published_at_normalized": published_at,
                 "published_date": published_at.date().isoformat(),
                 "outlet_name": outlet_name,
@@ -1483,12 +2025,8 @@ def build_fact_article_source(
                 "canonical_url": canonical_url,
                 "author": _clean_text(_coerce_optional_str(row["raw_author"])) or None,
                 "language": language,
-                "acquisition_method": (
-                    "restricted_export"
-                    if row["rights_class"] == "restricted_local"
-                    else "supplemental_import"
-                ),
-                "parser_status": "parsed",
+                "acquisition_method": acquisition_method,
+                "parser_status": parser_status,
                 "rights_class": row["rights_class"],
                 "raw_file_path": row["raw_file_path"],
                 "raw_file_type": row["raw_file_type"],
@@ -1577,7 +2115,8 @@ def build_fact_article(
 
     article_rows = []
     grouped = working_df.sort_values(
-        by=["published_at_normalized", "article_source_id"],
+        by=["has_full_text", "published_at_normalized", "article_source_id"],
+        ascending=[False, True, True],
         na_position="last",
     ).groupby("duplicate_group_id", dropna=False)
     for duplicate_group_id, group_df in grouped:
@@ -1594,6 +2133,7 @@ def build_fact_article(
                 "title_normalized": representative["title_normalized"],
                 "body_text": representative["body_text"],
                 "body_text_hash": representative["body_text_hash"],
+                "has_full_text": bool(representative["has_full_text"]),
                 "published_at": representative["published_at_normalized"],
                 "published_date": representative["published_date"],
                 "domain": _derive_domain(
@@ -1743,6 +2283,7 @@ def build_article_source_from_search_hits(
                 "title_normalized": normalize_text_for_match(title),
                 "body_text": body_text,
                 "body_text_hash": _stable_md5(body_text),
+                "has_full_text": True,
                 "published_at_normalized": published_at,
                 "published_date": published_at.date().isoformat(),
                 "outlet_name": hit.outlet_key,

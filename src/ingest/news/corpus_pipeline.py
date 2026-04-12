@@ -34,6 +34,7 @@ from src.config.settings import BRONZE_DIR, GOLD_DIR, SILVER_DIR, WAREHOUSE_PATH
 from src.ingest.news.corpus import (
     build_fact_article,
     build_fact_article_source,
+    enrich_article_sources_with_web_cache,
     inspect_import_batch,
     load_news_import_manifest,
     parse_import_batch,
@@ -101,6 +102,7 @@ def run_news_corpus_etl(
     silver_dir: Path = SILVER_DIR,
     gold_dir: Path = GOLD_DIR,
     duckdb_path: Path = WAREHOUSE_PATH,
+    enable_web_scrape: bool = False,
 ) -> NewsCorpusRunResult:
     """Run the enterprise news corpus ETL and materialize all main artifacts.
 
@@ -112,16 +114,33 @@ def run_news_corpus_etl(
         silver_dir: Silver output root.
         gold_dir: Gold output root.
         duckdb_path: Warehouse path.
+        enable_web_scrape: Whether this run may fetch uncached web article URLs.
 
     Returns:
         Summary object with status, row counts, and artifact paths.
     """
     run_id = str(uuid.uuid4())
     manifest = load_news_import_manifest(import_manifest_path)
+    if manifest.window_start is None or manifest.window_end is None:
+        raise ValueError("News import manifest must define window_start and window_end")
     inspection = inspect_import_batch(manifest)
     bronze_source_df, unsupported_df = parse_import_batch(manifest, inspection)
     fact_article_source_df, rejected_source_df = build_fact_article_source(
-        bronze_source_df
+        bronze_source_df,
+        window_start=manifest.window_start,
+        window_end=manifest.window_end,
+    )
+    web_fetch_cache_path = (
+        bronze_dir / "news_web_fetch" / "news_web_fetch_cache.parquet"
+    )
+    (
+        fact_article_source_df,
+        web_enrichment_report,
+        web_fetch_cache_written,
+    ) = enrich_article_sources_with_web_cache(
+        fact_article_source_df,
+        cache_path=web_fetch_cache_path,
+        enable_web_scrape=enable_web_scrape,
     )
 
     if not sample_leaders_path.exists():
@@ -169,6 +188,7 @@ def run_news_corpus_etl(
         fact_mention_df=fact_mention_df,
         mart_exposure_metrics_df=mart_exposure_metrics_df,
         mart_regression_results_df=mart_regression_results_df,
+        web_enrichment_report=web_enrichment_report,
     )
 
     persisted_bronze_source_df = _prepare_persisted_text_table(
@@ -185,6 +205,8 @@ def run_news_corpus_etl(
     )
 
     artifact_paths: list[str] = [str(import_manifest_path)]
+    if web_fetch_cache_written or web_fetch_cache_path.exists():
+        artifact_paths.append(str(web_fetch_cache_path))
     parquet_specs = [
         (
             persisted_bronze_source_df,

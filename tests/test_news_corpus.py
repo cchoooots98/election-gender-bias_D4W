@@ -13,22 +13,27 @@ import pytest
 
 from scripts import run_news_corpus_pipeline as script_wrapper
 from src.cli import run_news_corpus_pipeline as cli_module
+from src.ingest.news import corpus as corpus_module
 from src.ingest.news import corpus_pipeline as corpus_pipeline_module
 from src.ingest.news import marts as marts_module
 from src.ingest.news.corpus import (
+    _coerce_optional_str,
     _extract_europresse_declared_document_count,
     _is_europresse_format,
     _parse_timestamp,
     _segment_europresse_articles,
     build_fact_article,
     build_fact_article_source,
+    enrich_article_sources_with_web_cache,
     inspect_import_batch,
     load_news_import_manifest,
     parse_import_batch,
     write_news_import_manifest,
+    write_news_web_fetch_cache,
 )
 from src.ingest.news.corpus_pipeline import run_news_corpus_etl
 from src.ingest.news.marts import (
+    build_mart_exposure_metrics,
     build_mart_regression_feature_base,
     build_mart_regression_results,
 )
@@ -38,6 +43,7 @@ from src.ingest.news.models import (
     ImportBatchInspection,
     NewsImportManifest,
 )
+from src.ingest.news.normalize import canonicalize_url, sanitize_request_url
 from src.orchestration import news_corpus_pipeline as orchestration_module
 from src.transform._exceptions import DataQualityError
 
@@ -87,6 +93,32 @@ def _make_bronze_row(
         "rights_class": "restricted_local",
         "_ingested_at": datetime(2026, 4, 7, tzinfo=UTC).isoformat(),
     }
+
+
+def test_coerce_optional_str_returns_empty_for_container_values():
+    """Regression: pandas null checks must not raise on list or dict inputs."""
+    assert _coerce_optional_str([1, 2, 3]) == ""
+    assert _coerce_optional_str({"api_key": "secret"}) == ""
+
+
+def test_canonicalize_url_removes_sensitive_query_params():
+    """Regression: canonical URLs must not retain credentials or tracking noise."""
+    url = (
+        "https://www.example.com/article/?utm_source=newsletter"
+        "&api_key=secret&token=hidden&keep=1"
+    )
+
+    assert canonicalize_url(url) == "https://example.com/article?keep=1"
+
+
+def test_sanitize_request_url_removes_sensitive_query_params():
+    """Regression: persisted request metadata must redact credential-like params."""
+    url = "https://example.com/article?utm_source=newsletter&api_key=secret&keep=1"
+
+    assert (
+        sanitize_request_url(url)
+        == "https://example.com/article?utm_source=newsletter&keep=1"
+    )
 
 
 def test_news_import_manifest_roundtrip(tmp_path):
@@ -179,12 +211,286 @@ def test_build_fact_article_source_normalizes_and_rejects_bad_rows():
         ]
     )
 
-    accepted_df, rejected_df = build_fact_article_source(bronze_df)
+    accepted_df, rejected_df = build_fact_article_source(
+        bronze_df,
+        window_start=date(2025, 11, 1),
+        window_end=date(2026, 4, 30),
+    )
 
     assert len(accepted_df) == 4
     assert len(rejected_df) == 1
     assert accepted_df["language"].eq("fr").all()
     assert "published_at unparseable" in rejected_df.loc[0, "_rejection_reason"]
+
+
+def test_build_fact_article_source_rejects_articles_outside_analysis_window():
+    """Regression: articles published outside the analysis window must be quarantined.
+
+    Previously window_start/window_end were metadata-only fields with no DQ enforcement.
+    This test ensures out-of-window rows land in the rejected table with an informative reason.
+
+    Note: 7 in-window + 2 out-of-window = 22% reject rate, safely below the 25% DQ threshold.
+    """
+    window_start = date(2025, 11, 1)
+    window_end = date(2026, 4, 30)
+    in_window_body = _valid_body("DUPONT Alice", "Lyon")
+    out_before_body = _valid_body("MARTIN Jean", "Paris")
+    out_after_body = _valid_body("BERNARD Claire", "Marseille")
+
+    in_window_rows = [
+        _make_bronze_row(
+            f"in-window-{index}",
+            title=f"DUPONT Alice article {index}",
+            body_text=in_window_body,
+            published_at="2026-01-15",  # inside [2025-11-01, 2026-04-30]
+            outlet="Le Monde",
+        )
+        for index in range(7)
+    ]
+    out_of_window_rows = [
+        _make_bronze_row(
+            "before-window-1",
+            title="MARTIN Jean article ancien",
+            body_text=out_before_body,
+            published_at="2025-10-31",  # one day before window_start
+            outlet="Le Figaro",
+        ),
+        _make_bronze_row(
+            "after-window-1",
+            title="BERNARD Claire article futur",
+            body_text=out_after_body,
+            published_at="2026-05-01",  # one day after window_end
+            outlet="Libération",
+        ),
+    ]
+    bronze_df = pd.DataFrame(in_window_rows + out_of_window_rows)
+
+    accepted_df, rejected_df = build_fact_article_source(
+        bronze_df,
+        window_start=window_start,
+        window_end=window_end,
+    )
+
+    assert len(accepted_df) == 7, "Only in-window articles should be accepted"
+    assert len(rejected_df) == 2, "Both out-of-window articles must be quarantined"
+    rejection_reasons = rejected_df["_rejection_reason"].tolist()
+    assert all("outside analysis window" in reason for reason in rejection_reasons)
+    assert any("2025-10-31" in reason for reason in rejection_reasons)
+    assert any("2026-05-01" in reason for reason in rejection_reasons)
+
+
+def test_build_fact_article_source_requires_complete_analysis_window():
+    """DQ contract: callers must not silently disable the publication window."""
+    with pytest.raises(ValueError, match="window_start and window_end"):
+        build_fact_article_source(
+            pd.DataFrame(),
+            window_start=None,
+            window_end=date(2026, 4, 30),
+        )
+
+
+def test_run_news_corpus_etl_fails_fast_on_missing_manifest_window(
+    monkeypatch, tmp_path
+):
+    """DQ contract: manifest analysis windows are required for production ETL."""
+    monkeypatch.setattr(
+        corpus_pipeline_module,
+        "load_news_import_manifest",
+        lambda _: SimpleNamespace(
+            batch_id="batch-missing-window",
+            source_system="europresse",
+            window_start=None,
+            window_end=date(2026, 4, 30),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="window_start and window_end"):
+        run_news_corpus_etl(
+            import_manifest_path=tmp_path / "news_import_manifest.json",
+            sample_leaders_path=tmp_path / "sample_leaders.parquet",
+            dim_commune_path=tmp_path / "dim_commune.parquet",
+        )
+
+
+def test_enrich_article_sources_reuses_cached_web_body_without_network(
+    tmp_path,
+    monkeypatch,
+):
+    """Regression: cached web extractions should survive offline full refreshes."""
+    article_url = (
+        "https://actu.fr/ile-de-france/ferrieres-en-brie_77181/" "article_63956385.html"
+    )
+    bronze_df = pd.DataFrame(
+        [
+            _make_bronze_row(
+                "web-stub-1",
+                title="A Ferrieres-en-Brie, trois candidates sont en lice",
+                body_text=(
+                    "Par Julia Gualtieri Publié le 11 mars 2026 à 8h00... "
+                    f"Read more {article_url} This document contains links to Web-sites."
+                ),
+                published_at="11 mars 2026",
+                outlet="Actu.fr (site web réf.) - Actu",
+                article_url=article_url,
+            )
+        ]
+    )
+    accepted_df, rejected_df = build_fact_article_source(
+        bronze_df,
+        window_start=date(2025, 11, 1),
+        window_end=date(2026, 4, 30),
+    )
+    cache_path = tmp_path / "news_web_fetch_cache.parquet"
+    cached_body = _valid_body("FAYSSE-HASSAN Catherine", "Ferrieres-en-Brie")
+    write_news_web_fetch_cache(
+        pd.DataFrame(
+            [
+                {
+                    "canonical_url": accepted_df.loc[0, "canonical_url"],
+                    "source_url": article_url,
+                    "fetch_status": "success",
+                    "http_status": 200,
+                    "body_text": cached_body,
+                    "body_text_hash": "cached-body-hash",
+                    "body_text_preview": cached_body[:120],
+                    "body_text_length": len(cached_body),
+                    "fetched_at": datetime(2026, 4, 11, tzinfo=UTC).isoformat(),
+                    "extractor_name": "trafilatura",
+                    "extractor_version": "test",
+                    "error_type": None,
+                }
+            ]
+        ),
+        cache_path,
+    )
+    monkeypatch.setattr(
+        "src.ingest.news.corpus._fetch_web_article",
+        lambda *_: pytest.fail("network fetch should not run on cache hit"),
+    )
+
+    enriched_df, report, cache_written = enrich_article_sources_with_web_cache(
+        accepted_df,
+        cache_path=cache_path,
+        enable_web_scrape=False,
+    )
+
+    assert rejected_df.empty
+    assert bool(accepted_df.loc[0, "has_full_text"]) is False
+    assert bool(enriched_df.loc[0, "has_full_text"]) is True
+    assert enriched_df.loc[0, "body_text"] == cached_body
+    assert enriched_df.loc[0, "acquisition_method"] == "web_scrape"
+    assert report["web_scrape_cache_hit_count"] == 1
+    assert cache_written is False
+
+
+def test_enrich_article_sources_fetches_uncached_urls_when_enabled(
+    tmp_path,
+    monkeypatch,
+):
+    """Happy path: opt-in scraping should fill web-reference stubs and write cache."""
+    article_url = "https://example.org/article.html"
+    bronze_df = pd.DataFrame(
+        [
+            _make_bronze_row(
+                "web-stub-2",
+                title="FAYSSE-HASSAN Catherine présente sa liste",
+                body_text=(
+                    "Read more https://example.org/article.html "
+                    "This document contains links to Web-sites."
+                ),
+                published_at="11 mars 2026",
+                outlet="Actu.fr (site web réf.) - Actu",
+                article_url=article_url,
+            )
+        ]
+    )
+    accepted_df, _ = build_fact_article_source(bronze_df)
+    scraped_body = _valid_body("FAYSSE-HASSAN Catherine", "Ferrieres-en-Brie")
+
+    def fake_fetch(canonical_url: str, source_url: str) -> dict[str, object]:
+        return {
+            "canonical_url": canonical_url,
+            "source_url": source_url,
+            "fetch_status": "success",
+            "http_status": 200,
+            "body_text": scraped_body,
+            "body_text_hash": "scraped-body-hash",
+            "body_text_preview": scraped_body[:120],
+            "body_text_length": len(scraped_body),
+            "fetched_at": datetime(2026, 4, 11, tzinfo=UTC).isoformat(),
+            "extractor_name": "trafilatura",
+            "extractor_version": "test",
+            "error_type": None,
+        }
+
+    monkeypatch.setattr("src.ingest.news.corpus._fetch_web_article", fake_fetch)
+
+    enriched_df, report, cache_written = enrich_article_sources_with_web_cache(
+        accepted_df,
+        cache_path=tmp_path / "news_web_fetch_cache.parquet",
+        enable_web_scrape=True,
+    )
+
+    assert bool(enriched_df.loc[0, "has_full_text"]) is True
+    assert enriched_df.loc[0, "body_text"] == scraped_body
+    assert report["web_scrape_success_count"] == 1
+    assert cache_written is True
+
+
+def test_enrich_article_sources_degrades_failed_scrapes_to_metadata_only(
+    tmp_path,
+    monkeypatch,
+):
+    """Error path: scrape failures should preserve metadata without crashing."""
+    article_url = "https://example.org/paywalled.html"
+    bronze_df = pd.DataFrame(
+        [
+            _make_bronze_row(
+                "web-stub-3",
+                title="Article municipal",
+                body_text=(
+                    "Read more https://example.org/paywalled.html "
+                    "This document contains links to Web-sites."
+                ),
+                published_at="11 mars 2026",
+                outlet="Actu.fr (site web réf.) - Actu",
+                article_url=article_url,
+            )
+        ]
+    )
+    accepted_df, _ = build_fact_article_source(bronze_df)
+
+    def fake_fetch(canonical_url: str, source_url: str) -> dict[str, object]:
+        return {
+            "canonical_url": canonical_url,
+            "source_url": source_url,
+            "fetch_status": "short_text",
+            "http_status": 200,
+            "body_text": "paywall",
+            "body_text_hash": "short-body-hash",
+            "body_text_preview": "paywall",
+            "body_text_length": 7,
+            "fetched_at": datetime(2026, 4, 11, tzinfo=UTC).isoformat(),
+            "extractor_name": "trafilatura",
+            "extractor_version": "test",
+            "error_type": "body_text_too_short",
+        }
+
+    monkeypatch.setattr("src.ingest.news.corpus._fetch_web_article", fake_fetch)
+
+    enriched_df, report, cache_written = enrich_article_sources_with_web_cache(
+        accepted_df,
+        cache_path=tmp_path / "news_web_fetch_cache.parquet",
+        enable_web_scrape=True,
+    )
+
+    assert bool(enriched_df.loc[0, "has_full_text"]) is False
+    assert pd.isna(enriched_df.loc[0, "body_text"])
+    assert pd.isna(enriched_df.loc[0, "body_text_hash"])
+    assert enriched_df.loc[0, "acquisition_method"] == "url_metadata_only"
+    assert report["web_scrape_failure_count"] == 1
+    assert report["url_metadata_only_count"] == 1
+    assert cache_written is True
 
 
 def test_build_fact_article_merges_url_and_url_less_records_via_hybrid_content():
@@ -202,6 +508,7 @@ def test_build_fact_article_merges_url_and_url_less_records_via_hybrid_content()
                 "title_normalized": "dupont alice conduit la campagne",
                 "body_text": article_body,
                 "body_text_hash": "body-hash-1",
+                "has_full_text": True,
                 "published_at_normalized": pd.Timestamp("2026-03-15T08:00:00Z"),
                 "published_date": "2026-03-15",
                 "outlet_name": "Le Parisien",
@@ -231,6 +538,7 @@ def test_build_fact_article_merges_url_and_url_less_records_via_hybrid_content()
                 "title_normalized": "dupont alice conduit la campagne",
                 "body_text": article_body,
                 "body_text_hash": "body-hash-1",
+                "has_full_text": True,
                 "published_at_normalized": pd.Timestamp("2026-03-15T08:00:00Z"),
                 "published_date": "2026-03-15",
                 "outlet_name": "Le Parisien",
@@ -337,6 +645,115 @@ def test_build_fact_mentions_matches_compound_given_names_without_manual_review(
     assert len(fact_mention_df) == 1
     assert fact_mention_df.loc[0, "match_method"] == "exact_full_name"
     assert bool(fact_mention_df.loc[0, "headline_mention_flag"]) is True
+
+
+def test_build_fact_mentions_ignores_metadata_only_candidate_filename_evidence():
+    """Regression: candidate-named PDFs must not create evidence by file path."""
+    fact_article_df = pd.DataFrame(
+        [
+            {
+                "canonical_article_id": "article-metadata-only",
+                "title": "Le conseil municipal adopte son budget local",
+                "body_text": None,
+                "canonical_url": "https://example.org/conseil-municipal-budget.html",
+                "representative_url": "https://example.org/conseil-municipal-budget.html",
+                "raw_file_path": "data/raw/news/FAYSSE-HASSAN_Catherine.pdf",
+                "outlet_name": "Actu.fr",
+                "published_at": pd.Timestamp("2026-03-13T08:00:00Z"),
+            }
+        ]
+    )
+    sample_leaders_df = pd.DataFrame(
+        [
+            {
+                "leader_id": "leader-faysse",
+                "full_name": "FAYSSE-HASSAN Catherine",
+                "commune_name": "Ferrieres-en-Brie",
+                "same_name_candidate_count": 1,
+            }
+        ]
+    )
+
+    fact_mention_df, manual_review_df = build_fact_mentions(
+        fact_article_df,
+        sample_leaders_df,
+    )
+
+    assert fact_mention_df.empty
+    assert manual_review_df.empty
+
+
+def test_build_mart_exposure_metrics_splits_full_text_and_metadata_only_counts():
+    """Regression: exposure keeps the denominator and separates text availability."""
+    sample_leaders_df = pd.DataFrame(
+        [
+            {
+                "leader_id": f"leader-{index:03d}",
+                "gender": "F" if index % 2 == 0 else "M",
+                "commune_insee": f"{index:05d}",
+                "city_size_bucket": "small",
+                "reg_code": "11",
+                "nuance_group": "gauche",
+                "is_incumbent": False,
+                "won_final_round": False,
+            }
+            for index in range(1, 37)
+        ]
+    )
+    dim_commune_df = pd.DataFrame(
+        {
+            "commune_insee": [f"{index:05d}" for index in range(1, 37)],
+            "population": [10_000 for _ in range(1, 37)],
+        }
+    )
+    fact_article_df = pd.DataFrame(
+        [
+            {
+                "canonical_article_id": "article-full-text",
+                "outlet_name_normalized": "actu fr",
+                "rights_class": "restricted_local",
+                "acquisition_methods": "web_scrape",
+                "has_full_text": True,
+            },
+            {
+                "canonical_article_id": "article-metadata-only",
+                "outlet_name_normalized": "actu fr",
+                "rights_class": "restricted_local",
+                "acquisition_methods": "url_metadata_only",
+                "has_full_text": False,
+            },
+        ]
+    )
+    fact_mention_df = pd.DataFrame(
+        [
+            {
+                "leader_id": "leader-001",
+                "canonical_article_id": "article-full-text",
+                "headline_mention_flag": True,
+            },
+            {
+                "leader_id": "leader-001",
+                "canonical_article_id": "article-metadata-only",
+                "headline_mention_flag": False,
+            },
+        ]
+    )
+
+    exposure_df = build_mart_exposure_metrics(
+        sample_leaders_df,
+        fact_article_df,
+        fact_mention_df,
+        dim_commune_df,
+    )
+    covered_row = exposure_df.loc[exposure_df["leader_id"] == "leader-001"].iloc[0]
+    uncovered_rows = exposure_df.loc[exposure_df["leader_id"] != "leader-001"]
+
+    assert len(exposure_df) == 36
+    assert covered_row["article_count"] == 2
+    assert covered_row["full_text_article_count"] == 1
+    assert covered_row["metadata_only_article_count"] == 1
+    assert bool(covered_row["has_full_text"]) is True
+    assert uncovered_rows["article_count"].sum() == 0
 
 
 def test_run_news_corpus_etl_builds_24_row_exposure_mart(tmp_path):
@@ -475,6 +892,59 @@ def test_build_mart_regression_results_includes_bloc_and_region_controls():
     assert any(name.startswith("nuance_group_") for name in variable_names)
     assert any(name.startswith("reg_code_") for name in variable_names)
     assert "won_final_round" in variable_names
+
+
+def test_build_regression_design_matrix_keeps_stable_column_order():
+    """Regression: model coefficient order should be deterministic for auditability."""
+    modeling_df = pd.DataFrame(
+        [
+            {
+                "gender_female": 1,
+                "is_incumbent": 0,
+                "won_final_round": 1,
+                "city_size_bucket": "small",
+                "restricted_source_article_count": 2,
+                "supplemental_source_article_count": 0,
+                "nuance_group": "centre",
+                "reg_code": "11",
+            },
+            {
+                "gender_female": 0,
+                "is_incumbent": 1,
+                "won_final_round": 0,
+                "city_size_bucket": "medium",
+                "restricted_source_article_count": 0,
+                "supplemental_source_article_count": 1,
+                "nuance_group": "gauche",
+                "reg_code": "84",
+            },
+            {
+                "gender_female": 1,
+                "is_incumbent": 0,
+                "won_final_round": 0,
+                "city_size_bucket": "large",
+                "restricted_source_article_count": 1,
+                "supplemental_source_article_count": 1,
+                "nuance_group": "centre",
+                "reg_code": "11",
+            },
+        ]
+    )
+
+    design_matrix_df = marts_module._build_regression_design_matrix(modeling_df)
+
+    assert design_matrix_df.columns.tolist() == [
+        "const",
+        "gender_female",
+        "is_incumbent",
+        "won_final_round",
+        "bucket_large",
+        "bucket_medium",
+        "restricted_source_article_count",
+        "supplemental_source_article_count",
+        "nuance_group_gauche",
+        "reg_code_84",
+    ]
 
 
 def test_build_mart_regression_results_marks_fit_warnings(monkeypatch):
@@ -740,12 +1210,61 @@ _EUROPRESSE_TWO_ARTICLES = (
     "This document is destined for the exclusive use of...\n"
     "Outlet B\n• p. 8\n• 250 words\nPage b2\nSecond title\nSecond body."
 )
+_EUROPRESSE_SINGLE_DOCUMENT = (
+    "Saved documents\n"
+    "1 document\n"
+    "Vendredi 21 novembre 2025\n"
+    "Midi Libre\n"
+    "â€¢ 139 words\n"
+    "Â© 2025 Midi Libre. Tous droits rÃ©servÃ©s.\n"
+    "Myriam Bui-Xuan veut faire vivre Â« le coeur du village Â»\n"
+    "Une erreur s'est glissÃ©e dans notre article du 7 novembre dernier "
+    "consacrÃ© Ã  la candidature aux municipales prochaines de Myriam Bui-Xuan. "
+    "Sa liste veut faire vivre le coeur du village Ã  Clapiers.\n"
+    "This document is destined for the exclusive use of the subscriber.\n"
+)
+_EUROPRESSE_SITE_WEB_REF_ARTICLE = (
+    "11 mars 2026\n"
+    "Actu.fr (site web rÃ©f.) - Actu\n"
+    "â€¢ 855 words\n"
+    "A FerriÃ¨res-en-Brie, trois candidates sont en lice aux Ã©lections municipales "
+    "2026 : que proposent-elles ?\n"
+    "Julia Gualtieri\n"
+    "Par Julia Gualtieri PubliÃ© le 11 mars 2026 Ã  8h00...\n"
+    "Read more\n"
+    "\n"
+    "https://actu.fr/ile-de-france/ferrieres-en-\n"
+    "\n"
+    "brie_77181/a-ferrieres-en-brie-trois-ca\n"
+    "\n"
+    "ndidates-sont-en-lice-aux-elections-mu\n"
+    "\n"
+    "nicipales-2026-que-proposent-elles_63956385.html\n"
+    "This document contains links to Web-sites that are not hosted by CEDROM-SNi.\n"
+)
+_EUROPRESSE_ENGLISH_DATE_ARTICLE = (
+    "Saved documents\n"
+    "Thursday, January 15, 2026\n"
+    "Paris-Normandie (site web)\n"
+    "â€¢ 260 words\n"
+    "Lecoq candidat à la mairie, Pirouelle vers le record, Gorgelin de retour à "
+    "Soquence... Le point actu à 20 h\n"
+    "Jean-Paul Lecoq candidat de la gauche à la mairie du Havre explique son "
+    "programme municipal, sa stratégie de campagne, le conseil municipal et les "
+    "enjeux locaux dans une interview complète publiée par la rédaction locale.\n"
+    "This document is destined for the exclusive use of the subscriber.\n"
+)
 _NON_EUROPRESSE_TEXT = "Some plain PDF text with no word-count bullets."
 
 
 def test_is_europresse_format_returns_true_for_multi_article_pdf():
     """Happy path: two or more word-count anchors → Europresse batch detected."""
     assert _is_europresse_format(_EUROPRESSE_TWO_ARTICLES) is True
+
+
+def test_is_europresse_format_returns_true_for_single_dated_europresse_document():
+    """Regression: one-document Europresse PDFs still use the structured parser."""
+    assert _is_europresse_format(_EUROPRESSE_SINGLE_DOCUMENT) is True
 
 
 def test_is_europresse_format_returns_false_for_single_article():
@@ -838,10 +1357,41 @@ def test_parse_timestamp_parses_french_literal_dates():
     )
 
 
+def test_parse_timestamp_parses_english_europresse_ui_dates():
+    """Regression: English Europresse UI dates should not reject French articles."""
+    assert _parse_timestamp("January 15, 2026") == pd.Timestamp("2026-01-15T00:00:00Z")
+    assert _parse_timestamp("Thursday, January 15, 2026") == pd.Timestamp(
+        "2026-01-15T00:00:00Z"
+    )
+
+
 def test_segment_europresse_articles_returns_correct_count():
     """Happy path: two anchors in the batch must yield exactly two article dicts."""
     articles = _segment_europresse_articles(_MINIMAL_EUROPRESSE_BATCH)
     assert len(articles) == 2
+
+
+def test_segment_europresse_articles_isolates_single_article_parse_errors(monkeypatch):
+    """Regression: one malformed Europresse segment should not drop sibling articles."""
+    original_splitter = corpus_module._extract_europresse_title_and_body
+
+    def fake_splitter(effective_lines: list[str]) -> tuple[str, str]:
+        if effective_lines and effective_lines[0].startswith("Un titre"):
+            raise ValueError("bad header")
+        return original_splitter(effective_lines)
+
+    monkeypatch.setattr(
+        corpus_module,
+        "_extract_europresse_title_and_body",
+        fake_splitter,
+    )
+
+    articles = _segment_europresse_articles(_MINIMAL_EUROPRESSE_BATCH)
+
+    assert len(articles) == 2
+    assert articles[0]["parse_error"] == "ValueError"
+    assert articles[0]["title"] == ""
+    assert articles[1]["title"].startswith("Deux")
 
 
 def test_segment_europresse_articles_extracts_date_and_outlet():
@@ -850,6 +1400,39 @@ def test_segment_europresse_articles_extracts_date_and_outlet():
     first = articles[0]
     assert first["published_at"] == "12 janvier 2026"
     assert first["outlet"] == "Le Progrès"
+
+
+def test_segment_europresse_articles_extracts_english_header_date():
+    """Regression: English UI dates should be valid Europresse publication dates."""
+    articles = _segment_europresse_articles(_EUROPRESSE_ENGLISH_DATE_ARTICLE)
+
+    assert len(articles) == 1
+    assert articles[0]["published_at"] == "January 15, 2026"
+    assert articles[0]["outlet"] == "Paris-Normandie (site web)"
+    assert "Lecoq candidat à la mairie" in articles[0]["title"]
+
+
+def test_segment_europresse_articles_extracts_single_document_pdf():
+    """Regression: one-document Europresse PDFs must parse as one article."""
+    articles = _segment_europresse_articles(_EUROPRESSE_SINGLE_DOCUMENT)
+
+    assert len(articles) == 1
+    assert articles[0]["published_at"] == "21 novembre 2025"
+    assert articles[0]["outlet"] == "Midi Libre"
+    assert "Myriam Bui-Xuan" in articles[0]["title"]
+    assert "Clapiers" in articles[0]["body_text"]
+
+
+def test_segment_europresse_articles_extracts_wrapped_read_more_url():
+    """Regression: wrapped Europresse web-reference URLs should survive parsing."""
+    articles = _segment_europresse_articles(_EUROPRESSE_SITE_WEB_REF_ARTICLE)
+
+    assert len(articles) == 1
+    assert articles[0]["article_url"] == (
+        "https://actu.fr/ile-de-france/ferrieres-en-brie_77181/"
+        "a-ferrieres-en-brie-trois-candidates-sont-en-lice-aux-elections-"
+        "municipales-2026-que-proposent-elles_63956385.html"
+    )
 
 
 def test_segment_europresse_articles_extracts_title_and_body():
@@ -962,7 +1545,9 @@ def test_segment_europresse_articles_joins_dash_split_outlet_name():
 def test_segment_europresse_articles_joins_unclosed_paren_outlet_name():
     """Regression: outlet names with an unclosed parenthesis must consume the next line."""
     articles = _segment_europresse_articles(_SPLIT_OUTLET_PAREN_BATCH)
-    assert articles[0]["outlet"] == "France 3 Régions (site web réf.) - France 3 Regions"
+    assert (
+        articles[0]["outlet"] == "France 3 Régions (site web réf.) - France 3 Regions"
+    )
 
 
 def test_extract_europresse_declared_document_count_reads_cover_page_summary():
@@ -1030,8 +1615,66 @@ def test_build_fact_article_source_accepts_french_dated_europresse_batch_rows():
         ]
     )
 
-    accepted_df, rejected_df = build_fact_article_source(bronze_df)
+    accepted_df, rejected_df = build_fact_article_source(
+        bronze_df,
+        window_start=date(2025, 11, 1),
+        window_end=date(2026, 4, 30),
+    )
 
     assert len(accepted_df) == 2
     assert rejected_df.empty
     assert accepted_df["published_date"].tolist() == ["2025-11-09", "2026-02-04"]
+
+
+def test_build_fact_article_source_accepts_single_document_europresse_rows():
+    """Regression: one-document Europresse rows should not be rejected for date parsing."""
+    segmented_articles = _segment_europresse_articles(_EUROPRESSE_SINGLE_DOCUMENT)
+    bronze_df = pd.DataFrame(
+        [
+            _make_bronze_row(
+                "bui-xuan-single",
+                title=segmented_articles[0]["title"],
+                body_text=segmented_articles[0]["body_text"],
+                published_at=segmented_articles[0]["published_at"],
+                outlet=segmented_articles[0]["outlet"],
+            )
+        ]
+    )
+
+    accepted_df, rejected_df = build_fact_article_source(
+        bronze_df,
+        window_start=date(2025, 11, 1),
+        window_end=date(2026, 4, 30),
+    )
+
+    assert len(accepted_df) == 1
+    assert rejected_df.empty
+    assert accepted_df.loc[0, "published_date"] == "2025-11-21"
+    assert bool(accepted_df.loc[0, "has_full_text"]) is True
+
+
+def test_build_fact_article_source_accepts_english_europresse_header_dates():
+    """Regression: English header dates must not reject French Europresse articles."""
+    segmented_articles = _segment_europresse_articles(_EUROPRESSE_ENGLISH_DATE_ARTICLE)
+    bronze_df = pd.DataFrame(
+        [
+            _make_bronze_row(
+                "lecoq-english-date",
+                title=segmented_articles[0]["title"],
+                body_text=segmented_articles[0]["body_text"],
+                published_at=segmented_articles[0]["published_at"],
+                outlet=segmented_articles[0]["outlet"],
+            )
+        ]
+    )
+
+    accepted_df, rejected_df = build_fact_article_source(
+        bronze_df,
+        window_start=date(2025, 11, 1),
+        window_end=date(2026, 4, 30),
+    )
+
+    assert len(accepted_df) == 1
+    assert rejected_df.empty
+    assert accepted_df.loc[0, "published_date"] == "2026-01-15"
+    assert bool(accepted_df.loc[0, "has_full_text"]) is True

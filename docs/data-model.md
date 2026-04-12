@@ -2,7 +2,7 @@
 
 > Model type: logical table contracts for the current medallion architecture.
 > Physical storage lives in Parquet plus `warehouse/municipal.duckdb`.
-> Last updated: 2026-04-10
+> Last updated: 2026-04-11
 
 ---
 
@@ -19,13 +19,13 @@ regression audit marts. The transformer-based NLP enrichment stack remains the
 main planned extension.
 
 Active news-analysis window for the implemented corpus slice:
-`2025-11-01` to `2026-04-01`.
+`2025-11-01` to `2026-04-30`.
 
 The implemented layers are:
 
 | Layer | Status | Current contract |
 |---|---|---|
-| Bronze | Implemented | Official raw datasets plus `news_source_record` with provenance and redacted text surrogates |
+| Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
 | Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, and quarantine outputs |
 | Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_regression_results` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
@@ -96,6 +96,26 @@ than being recomputed ad hoc in Gold. It is derived from the full Tour 1
 candidate universe, not only list leaders, because the downstream ambiguity risk
 concerns the broader name space that later article matching must navigate.
 
+### News web-enrichment cache
+
+Europresse web-reference articles use a two-stage enrichment contract. The CLI
+flag `--enable-web-scrape` means "fetch new uncached URLs"; it does not mean
+"use or ignore web data." Existing successful cache rows under
+`data/bronze/news_web_fetch/` are always eligible for reuse during a full
+refresh, even when the flag is omitted.
+
+This keeps the pipeline reproducible after a successful scrape: a rerun can
+rebuild Silver and Gold from local artifacts without visiting the same news URL
+again. The cache lives under `data/`, which is git-ignored. It may contain local
+full extracted text so candidate matching can be reproduced across runs, while
+the committed repository and published Silver/Gold text artifacts continue to
+store redacted text markers plus hash/preview/length surrogates.
+
+Single-document Europresse PDFs are also routed through the structured
+Europresse parser when the segmenter recovers at least one dated article. Plain
+single-article PDFs without Europresse date/header evidence still fall back to
+the generic `pdf_text_layer` classification.
+
 ---
 
 ## Bronze Layer
@@ -154,6 +174,32 @@ appended.
 - Text contract: persisted artifacts store `raw_body_text_hash` / preview / length
   surrogates instead of the full article body; full text is used transiently in
   memory during the ETL run only
+
+### `bronze/news_web_fetch/news_web_fetch_cache.parquet`
+
+- Grain: one row per canonical web article URL fetch attempt
+- Source: web-reference URLs extracted from Europresse `Read more` links
+- Role: local replay cache for web full-text enrichment
+- Network contract: cache hits are reused without network access; cache misses
+  are fetched only when `--enable-web-scrape` is passed to the CLI
+- Local text contract: this artifact is under git-ignored `data/` and may store
+  extracted `body_text` for deterministic local reruns; published Silver/Gold
+  outputs keep redacted text markers and hash/preview/length metadata
+
+| Column | Type | Notes |
+|---|---|---|
+| `canonical_url` | VARCHAR | Canonical URL hash key after normalization |
+| `source_url` | VARCHAR | Original URL extracted from the PDF |
+| `fetch_status` | VARCHAR | `success`, `short_text`, or `failed` |
+| `http_status` | INTEGER | HTTP response code when available |
+| `body_text` | VARCHAR | Local-only extracted full text when fetch succeeds |
+| `body_text_hash` | CHAR(32) | MD5 of extracted text when usable |
+| `body_text_preview` | VARCHAR | Short audit preview of extracted text |
+| `body_text_length` | INTEGER | Extracted text length in characters |
+| `fetched_at` | VARCHAR | UTC fetch timestamp |
+| `extractor_name` | VARCHAR | Current extractor: `trafilatura` |
+| `extractor_version` | VARCHAR | Installed extractor version |
+| `error_type` | VARCHAR | Failure or short-text reason |
 
 ---
 
@@ -265,6 +311,16 @@ Current implemented quarantine outputs include:
 - Text contract: persisted tables keep `body_text_hash`, `body_text_preview`,
   and `body_text_length`; the `body_text` column is a redaction marker rather
   than the original full body text
+- Web-enrichment contract:
+  - `has_full_text = TRUE` when the row has enough article body text for
+    candidate matching and later NLP enrichment
+  - `acquisition_method = web_scrape` when a cached or newly fetched web body
+    replaces an Europresse web-reference stub
+  - `acquisition_method = url_metadata_only` when a URL was preserved but the
+    body was unavailable, too short, or paywalled; in this case `body_text` and
+    `body_text_hash` are allowed to be `NULL`
+  - Rows with `url_metadata_only` remain matchable only through strict evidence
+    in title or URL; PDF filenames are not candidate-match evidence
 
 ### `silver.fact_article`
 
@@ -273,12 +329,19 @@ Current implemented quarantine outputs include:
 - Role: one analytical article denominator used for candidate matching
 - Text contract: persisted tables keep only redacted `body_text` plus
   preview/hash/length surrogates; full text is not retained on disk
+- Text availability: `has_full_text` summarizes whether the representative
+  canonical article has a usable full-text body. `url_metadata_only` rows may
+  still be retained as article metadata, but they only contribute to exposure
+  after strict candidate evidence creates a `silver.fact_mention` row.
 
 ### `silver.fact_mention`
 
 - Grain: one row per canonical article × sampled candidate match
 - Source: `silver.fact_article` matched against `gold.sample_leaders`
 - Role: anchor table for candidate-level coverage, framing, and future NLP outputs
+- Matching contract: full-text articles use title + body + URL evidence.
+  Metadata-only articles use title + URL evidence only; the original PDF path or
+  candidate-specific PDF filename is never treated as match evidence.
 
 ### `silver.manual_review_candidate_match`
 
@@ -407,6 +470,18 @@ Modeling note:
   `silver.dim_commune`
 - Role: leader-level coverage denominator with article counts, headline mentions,
   source diversity, and exposure normalized by commune population
+- Text-availability metrics:
+  - `article_count` remains derived from `silver.fact_mention`, so only articles
+    with strict candidate evidence count toward exposure
+  - `full_text_article_count` counts mentioned articles whose canonical article
+    has `has_full_text = TRUE`
+  - `metadata_only_article_count` counts mentioned articles whose canonical
+    article has `has_full_text = FALSE`
+  - `has_full_text` is a leader-level flag showing whether at least one counted
+    article has usable full text
+- Denominator contract: the mart still keeps one row per sampled leader, so the
+  active 36-person cohort denominator is preserved even for zero-coverage
+  leaders.
 
 ### `gold.mart_framing_metrics`
 
@@ -436,6 +511,21 @@ Modeling note:
 - Status contract: each row carries a `status` field such as `fitted`,
   `fitted_with_warning:*`, or `fit_failed:*` so statistical warnings remain
   visible in downstream audit artifacts
+
+### `data/gold/news_corpus_qa_report.json`
+
+- Grain: one JSON report per news corpus pipeline run
+- Role: lightweight run-level QA artifact for parser mix, language mix,
+  rejection rates, candidate coverage, regression status, and web-enrichment
+  behavior
+- Web-enrichment counters:
+  - `web_scrape_queued_count`: candidate URL rows considered for enrichment
+  - `web_scrape_cache_hit_count`: queued rows filled from local cache without
+    network access
+  - `web_scrape_success_count`: queued rows filled by newly fetched web text
+  - `url_metadata_only_count`: queued rows retained as metadata-only rows
+  - `web_scrape_failure_count`: queued rows whose scrape failed or returned
+    unusably short text
 
 ---
 

@@ -174,7 +174,11 @@ def generate_manifest(
         len(pdf_paths),
     )
     for pdf_path in pdf_paths:
-        origin = cohort_dir.name if pdf_path.parent.resolve() == cohort_dir.resolve() else pdf_path.parent.name
+        origin = (
+            cohort_dir.name
+            if pdf_path.parent.resolve() == cohort_dir.resolve()
+            else pdf_path.parent.name
+        )
         logger.info("  [%s] %s", origin, pdf_path.name)
 
     batch_id = _build_batch_id(cohort_id, exported_at)

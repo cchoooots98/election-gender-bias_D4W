@@ -54,6 +54,7 @@ def canonicalize_url(url: str) -> str:
         (key, value)
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
         if key.lower() not in _TRACKING_QUERY_PARAMS
+        and key.lower() not in _SENSITIVE_QUERY_PARAMS
     ]
     normalized_query = urlencode(filtered_params, doseq=True)
     return urlunparse(

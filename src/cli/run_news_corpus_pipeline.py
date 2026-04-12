@@ -42,8 +42,7 @@ Examples
         default=_DEFAULT_IMPORT_MANIFEST,
         metavar="PATH",
         help=(
-            "Path to news_import_manifest.json. "
-            f"Default: {_DEFAULT_IMPORT_MANIFEST}"
+            "Path to news_import_manifest.json. " f"Default: {_DEFAULT_IMPORT_MANIFEST}"
         ),
     )
     parser.add_argument(
@@ -63,6 +62,14 @@ Examples
         metavar="PATH",
         help="Path to dim_commune.parquet. Rarely needs overriding.",
     )
+    parser.add_argument(
+        "--enable-web-scrape",
+        action="store_true",
+        help=(
+            "Allow fetching uncached article URLs. Cached web fetches are reused "
+            "even when this flag is omitted."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -74,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             import_manifest_path=args.manifest_path,
             sample_leaders_path=args.sample_leaders_path,
             dim_commune_path=args.dim_commune_path,
+            enable_web_scrape=args.enable_web_scrape,
         )
     except Exception:
         logger.exception("News corpus pipeline exited with failure")
