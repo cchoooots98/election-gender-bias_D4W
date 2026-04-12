@@ -37,9 +37,6 @@ streamlit       # Python-native dashboard
 matplotlib      # Base plotting library
 seaborn         # Statistical visualization on top of matplotlib
 
-# Notebooks
-jupyterlab      # EDA environment; notebooks stay outside production code
-
 # Dev / quality tools
 black==24.10.0  # Stable formatter version for the Windows CI/dev toolchain
 ruff            # Fast linter
