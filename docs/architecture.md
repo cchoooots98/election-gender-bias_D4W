@@ -11,8 +11,8 @@ Two architectural horizons coexist in this project:
 - **Implemented sampling slice**: official-data ingest -> conformed Silver
   dimensions/facts -> `gold.candidate_universe` -> `gold.sample_leaders`
 - **Implemented downstream slices (separate entry points)**: sampled cohort ->
-  Europresse-first news corpus backbone -> exposure / regression audit marts ->
-  Streamlit dashboard
+  Europresse-first news corpus backbone -> DuckDB -> dbt Gold marts -> Python
+  regression/bootstrap diagnostics -> Streamlit dashboard
 - **Planned full pipeline**: implemented slice -> transformer NLP enrichment ->
   richer analytical marts
 
@@ -69,10 +69,13 @@ flowchart LR
     subgraph GLD["Gold"]
         G0["candidate_universe"]
         G1["sample_leaders ★"]
-        G2["mart_exposure_metrics"]
-        G3["mart_framing_metrics"]
-        G4["mart_bias_indicators"]
-        G5["mart_regression_results"]
+        G2["dbt: mart_exposure_metrics"]
+        G3["dbt: mart_framing_metrics<br>NLP pending"]
+        G4["dbt: mart_bias_indicators"]
+        G5["dbt: mart_regression_feature_base"]
+        G6["dbt: mart_analysis_summary"]
+        G7["Python: mart_regression_results"]
+        G8["Python: mart_bootstrap_ci"]
     end
 
     A1 --> B1
@@ -89,16 +92,17 @@ flowchart LR
     F2 --> NLP
     NLP --> F3 & F4
 
-    G1 & F3 --> G2 & G3 & G4 & G5
-    G2 & G3 & G4 & G5 --> DASH["Streamlit Dashboard"]
+    G1 & F3 --> G2 & G3 & G4 & G5 & G6
+    G5 --> G7 & G8
+    G2 & G3 & G4 & G6 & G7 & G8 --> DASH["Streamlit Dashboard"]
 ```
 
 **Runnable-slice note.** `src/orchestration/sampling_pipeline.py` currently
 stops after materializing `gold.candidate_universe` and `gold.sample_leaders`.
 `src/orchestration/news_corpus_pipeline.py` then runs the Europresse manifest
 through `news_source_record`, `fact_article_source`, `fact_article`,
-`fact_mention`, and the exposure / regression audit marts. The transformer NLP
-blocks shown above remain planned extensions.
+`fact_mention`, dbt-owned exposure/summary marts, and Python-owned regression
+diagnostics. The transformer NLP blocks shown above remain planned extensions.
 
 ---
 
@@ -219,7 +223,7 @@ sampling slices.
 | Warehouse | DuckDB (single file) | Snowflake / BigQuery (local) |
 | File format | Parquet (Snappy compressed) | Delta Lake / ORC |
 | Orchestration | Scripted runner now; Airflow planned | Prefect, Dagster, Airflow |
-| Future SQL layer | dbt-duckdb (planned, not scaffolded in repo) | dbt-snowflake, dbt-bigquery |
+| SQL mart layer | dbt-duckdb | dbt-snowflake, dbt-bigquery |
 | Future French NLP | CamemBERT family (planned) | BERT (English equivalent) |
 | Text extraction | pdfminer.six + BeautifulSoup + trafilatura fallback | Parser stack for archive exports |
 | Dashboard | Streamlit | Tableau, Looker |

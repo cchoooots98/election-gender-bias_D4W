@@ -9,9 +9,11 @@
 ifeq ($(OS),Windows_NT)
 VENV_BIN := .venv/Scripts
 PYTHON := $(VENV_BIN)/python.exe
+DBT_EXE := $(VENV_BIN)/dbt.exe
 else
 VENV_BIN := .venv/bin
 PYTHON := $(VENV_BIN)/python
+DBT_EXE := $(VENV_BIN)/dbt
 endif
 
 PIP := $(PYTHON) -m pip
@@ -21,9 +23,10 @@ RUFF := $(PYTHON) -m ruff
 BLACK := $(PYTHON) -m black
 JUPYTER := $(PYTHON) -m jupyterlab
 STREAMLIT := $(PYTHON) -m streamlit
+DBT := $(DBT_EXE)
 
 .PHONY: help lint format format-check test test-coverage install compile \
-        notebook dashboard run-sampling-pipeline \
+        notebook dashboard dbt-run dbt-test dbt-build run-sampling-pipeline \
         run-news-corpus-pipeline run-news-corpus-sa48 run-news-corpus-sa-relaxed \
         generate-manifest
 
@@ -50,6 +53,9 @@ help:
 	@echo "  Development"
 	@echo "    notebook       jupyter lab"
 	@echo "    dashboard      streamlit run src/dashboard/app.py"
+	@echo "    dbt-run        dbt run --select marts.news"
+	@echo "    dbt-test       dbt test --select marts.news"
+	@echo "    dbt-build      dbt build --select marts.news"
 	@echo "    run-sampling-pipeline      python -m src.cli.run_sampling_pipeline"
 	@echo "    run-news-corpus-pipeline   primary cohort (cohort_36, default sample_leaders)"
 	@echo "    run-news-corpus-sa48       sensitivity analysis: expanded cohort (48 candidates)"
@@ -85,6 +91,15 @@ notebook:
 
 dashboard:
 	$(STREAMLIT) run src/dashboard/app.py
+
+dbt-run:
+	$(DBT) run --project-dir dbt --profiles-dir dbt --select marts.news
+
+dbt-test:
+	$(DBT) test --project-dir dbt --profiles-dir dbt --select marts.news
+
+dbt-build:
+	$(DBT) build --project-dir dbt --profiles-dir dbt --select marts.news
 
 run-sampling-pipeline:
 	$(PYTHON) -m src.cli.run_sampling_pipeline

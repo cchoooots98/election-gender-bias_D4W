@@ -70,6 +70,13 @@ Examples
             "even when this flag is omitted."
         ),
     )
+    parser.add_argument(
+        "--bootstrap-resamples",
+        type=int,
+        default=2000,
+        metavar="N",
+        help="Number of bootstrap resamples for regression confidence intervals.",
+    )
     return parser.parse_args(argv)
 
 
@@ -82,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             sample_leaders_path=args.sample_leaders_path,
             dim_commune_path=args.dim_commune_path,
             enable_web_scrape=args.enable_web_scrape,
+            bootstrap_resamples=args.bootstrap_resamples,
         )
     except Exception:
         logger.exception("News corpus pipeline exited with failure")

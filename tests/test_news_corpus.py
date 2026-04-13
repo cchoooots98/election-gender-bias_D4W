@@ -15,7 +15,6 @@ from scripts import run_news_corpus_pipeline as script_wrapper
 from src.cli import run_news_corpus_pipeline as cli_module
 from src.ingest.news import corpus as corpus_module
 from src.ingest.news import corpus_pipeline as corpus_pipeline_module
-from src.ingest.news import marts as marts_module
 from src.ingest.news.corpus import (
     _coerce_optional_str,
     _extract_europresse_declared_document_count,
@@ -32,11 +31,7 @@ from src.ingest.news.corpus import (
     write_news_web_fetch_cache,
 )
 from src.ingest.news.corpus_pipeline import run_news_corpus_etl
-from src.ingest.news.marts import (
-    build_mart_exposure_metrics,
-    build_mart_regression_feature_base,
-    build_mart_regression_results,
-)
+from src.ingest.news.corpus_storage import write_duckdb_table
 from src.ingest.news.matching import build_fact_mentions
 from src.ingest.news.models import (
     ImportBatchFile,
@@ -44,6 +39,13 @@ from src.ingest.news.models import (
     NewsImportManifest,
 )
 from src.ingest.news.normalize import canonicalize_url, sanitize_request_url
+from src.metrics.news import regression as regression_module
+from src.metrics.news.dbt_runner import read_duckdb_table
+from src.metrics.news.quality import run_news_corpus_quality_checks
+from src.metrics.news.regression import (
+    build_mart_bootstrap_ci,
+    build_mart_regression_results,
+)
 from src.orchestration import news_corpus_pipeline as orchestration_module
 from src.transform._exceptions import DataQualityError
 
@@ -95,10 +97,285 @@ def _make_bronze_row(
     }
 
 
+def _write_stub_dbt_news_marts(duckdb_path: Path) -> None:
+    """Test double for dbt-owned marts when pytest cannot spawn dbt on Windows."""
+    sample_df = read_duckdb_table(
+        duckdb_path=duckdb_path,
+        schema_name="gold",
+        table_name="sample_leaders",
+    )
+    dim_commune_df = read_duckdb_table(
+        duckdb_path=duckdb_path,
+        schema_name="silver",
+        table_name="dim_commune",
+    )
+    fact_article_df = read_duckdb_table(
+        duckdb_path=duckdb_path,
+        schema_name="silver",
+        table_name="fact_article",
+    )
+    fact_mention_df = read_duckdb_table(
+        duckdb_path=duckdb_path,
+        schema_name="silver",
+        table_name="fact_mention",
+    )
+
+    for optional_column in ("is_incumbent", "won_final_round"):
+        if optional_column not in sample_df.columns:
+            sample_df[optional_column] = False
+
+    exposure_columns = [
+        "leader_id",
+        "gender",
+        "commune_insee",
+        "city_size_bucket",
+        "reg_code",
+        "nuance_group",
+        "is_incumbent",
+        "won_final_round",
+    ]
+    exposure_df = sample_df[exposure_columns].merge(
+        dim_commune_df[["commune_insee", "population"]],
+        on="commune_insee",
+        how="left",
+        validate="many_to_one",
+    )
+    if fact_mention_df.empty:
+        aggregated_df = pd.DataFrame(columns=["leader_id"])
+    else:
+        article_fields = [
+            "canonical_article_id",
+            "outlet_name_normalized",
+            "rights_class",
+            "acquisition_methods",
+            "has_full_text",
+        ]
+        mention_article_df = fact_mention_df.merge(
+            fact_article_df[article_fields],
+            on="canonical_article_id",
+            how="left",
+            validate="many_to_one",
+        )
+        mention_article_df["restricted_flag"] = (
+            mention_article_df["rights_class"].fillna("") == "restricted_local"
+        )
+        mention_article_df["supplemental_flag"] = (
+            mention_article_df["acquisition_methods"]
+            .fillna("")
+            .str.contains("supplemental")
+        )
+        mention_article_df["full_text_flag"] = (
+            mention_article_df["has_full_text"].astype("boolean").fillna(False)
+        )
+        aggregated_df = (
+            mention_article_df.groupby("leader_id", dropna=False)
+            .agg(
+                article_count=("canonical_article_id", "nunique"),
+                headline_mention_count=("headline_mention_flag", "sum"),
+                distinct_source_count=("outlet_name_normalized", "nunique"),
+                restricted_source_article_count=("restricted_flag", "sum"),
+                supplemental_source_article_count=("supplemental_flag", "sum"),
+                full_text_article_count=("full_text_flag", "sum"),
+            )
+            .reset_index()
+        )
+
+    exposure_df = exposure_df.merge(
+        aggregated_df,
+        on="leader_id",
+        how="left",
+        validate="one_to_one",
+    )
+    count_columns = [
+        "article_count",
+        "headline_mention_count",
+        "distinct_source_count",
+        "restricted_source_article_count",
+        "supplemental_source_article_count",
+        "full_text_article_count",
+    ]
+    for count_column in count_columns:
+        if count_column not in exposure_df.columns:
+            exposure_df[count_column] = 0
+    exposure_df[count_columns] = exposure_df[count_columns].fillna(0).astype(int)
+    exposure_df["metadata_only_article_count"] = (
+        exposure_df["article_count"] - exposure_df["full_text_article_count"]
+    )
+    exposure_df["has_full_text"] = exposure_df["full_text_article_count"] > 0
+    exposure_df["exposure_per_10k_population"] = (
+        exposure_df["article_count"] / (exposure_df["population"] / 10_000)
+    ).fillna(0.0)
+
+    regression_feature_df = exposure_df.copy()
+    regression_feature_df["gender_female"] = (
+        regression_feature_df["gender"] == "F"
+    ).astype(int)
+    regression_feature_df["is_incumbent"] = (
+        regression_feature_df["is_incumbent"]
+        .astype("boolean")
+        .fillna(False)
+        .astype(int)
+    )
+    regression_feature_df["won_final_round"] = (
+        regression_feature_df["won_final_round"]
+        .astype("boolean")
+        .fillna(False)
+        .astype(int)
+    )
+    regression_feature_df = regression_feature_df[
+        [
+            "leader_id",
+            "gender",
+            "gender_female",
+            "commune_insee",
+            "city_size_bucket",
+            "reg_code",
+            "nuance_group",
+            "is_incumbent",
+            "won_final_round",
+            "population",
+            "article_count",
+            "headline_mention_count",
+            "distinct_source_count",
+            "restricted_source_article_count",
+            "supplemental_source_article_count",
+            "exposure_per_10k_population",
+        ]
+    ]
+
+    frame_labels = [
+        "politique",
+        "vie_privee",
+        "apparence",
+        "scandale",
+        "personnalite",
+        "securite",
+        "unclassified",
+    ]
+    framing_df = pd.DataFrame(
+        [
+            {
+                "leader_id": leader_id,
+                "frame_label": frame_label,
+                "mention_count": 0,
+                "mean_frame_score": 0.0,
+            }
+            for leader_id in sample_df["leader_id"]
+            for frame_label in frame_labels
+        ]
+    )
+    bias_df = (
+        exposure_df.groupby("gender", dropna=False)
+        .agg(metric_value=("article_count", "mean"))
+        .reset_index()
+        .assign(metric_name="mean_article_count")
+    )[["gender", "metric_name", "metric_value"]]
+    analysis_df = pd.DataFrame(
+        columns=[
+            "analysis_id",
+            "analysis_section_id",
+            "analysis_name",
+            "dimension",
+            "group_label",
+            "metric_name",
+            "metric_value",
+            "note",
+        ]
+    )
+
+    for dataframe, table_name in [
+        (exposure_df, "mart_exposure_metrics"),
+        (framing_df, "mart_framing_metrics"),
+        (bias_df, "mart_bias_indicators"),
+        (regression_feature_df, "mart_regression_feature_base"),
+        (analysis_df, "mart_analysis_summary"),
+    ]:
+        write_duckdb_table(
+            dataframe=dataframe,
+            schema_name="gold",
+            table_name=table_name,
+            duckdb_path=duckdb_path,
+        )
+
+
+def _make_quality_check_inputs(
+    *,
+    accepted_count: int = 1,
+    rejected_count: int = 0,
+    regression_results_df: pd.DataFrame | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Build a minimal valid quality-check input bundle."""
+    fact_article_source_df = pd.DataFrame(
+        [
+            {
+                "article_source_id": f"source-{row_number}",
+                "title_normalized": f"title-{row_number}",
+                "published_at_normalized": "2026-03-01",
+                "outlet_name_normalized": "local-paper",
+                "language": "fr",
+                "body_text_hash": f"hash-{row_number}",
+                "has_full_text": True,
+            }
+            for row_number in range(accepted_count)
+        ]
+    )
+    return {
+        "sample_leaders_df": pd.DataFrame([{"leader_id": "leader-001"}]),
+        "fact_article_source_df": fact_article_source_df,
+        "fact_article_source_rejected_df": pd.DataFrame(
+            [
+                {
+                    "article_source_id": f"rejected-{row_number}",
+                    "_rejection_reason": "invalid_language",
+                }
+                for row_number in range(rejected_count)
+            ]
+        ),
+        "fact_article_df": pd.DataFrame([{"canonical_article_id": "article-001"}]),
+        "fact_mention_df": pd.DataFrame(
+            [
+                {
+                    "canonical_article_id": "article-001",
+                    "leader_id": "leader-001",
+                }
+            ]
+        ),
+        "mart_exposure_metrics_df": pd.DataFrame(
+            [{"leader_id": "leader-001", "article_count": 1}]
+        ),
+        "mart_regression_results_df": (
+            regression_results_df
+            if regression_results_df is not None
+            else pd.DataFrame([{"status": "fitted"}])
+        ),
+    }
+
+
 def test_coerce_optional_str_returns_empty_for_container_values():
     """Regression: pandas null checks must not raise on list or dict inputs."""
     assert _coerce_optional_str([1, 2, 3]) == ""
     assert _coerce_optional_str({"api_key": "secret"}) == ""
+
+
+def test_news_quality_checks_use_configured_rejected_ratio_threshold():
+    """Regression: rejected-ratio DQ should honor DQ_MAX_NULL_RATE, not 25%."""
+    quality_inputs = _make_quality_check_inputs(
+        accepted_count=18,
+        rejected_count=1,
+    )
+
+    with pytest.raises(DataQualityError, match="rejected ratio"):
+        run_news_corpus_quality_checks(**quality_inputs)
+
+
+def test_news_quality_checks_require_regression_status_column():
+    """Regression: missing regression status must be a contract failure."""
+    quality_inputs = _make_quality_check_inputs(
+        regression_results_df=pd.DataFrame([{"model_name": "poisson_exposure"}])
+    )
+
+    with pytest.raises(DataQualityError, match="status"):
+        run_news_corpus_quality_checks(**quality_inputs)
 
 
 def test_canonicalize_url_removes_sensitive_query_params():
@@ -198,7 +475,7 @@ def test_build_fact_article_source_normalizes_and_rejects_bad_rows():
                 published_at="2026-03-15",
                 outlet="Le Parisien",
             )
-            for index in range(4)
+            for index in range(20)
         ]
         + [
             _make_bronze_row(
@@ -217,7 +494,7 @@ def test_build_fact_article_source_normalizes_and_rejects_bad_rows():
         window_end=date(2026, 4, 30),
     )
 
-    assert len(accepted_df) == 4
+    assert len(accepted_df) == 20
     assert len(rejected_df) == 1
     assert accepted_df["language"].eq("fr").all()
     assert "published_at unparseable" in rejected_df.loc[0, "_rejection_reason"]
@@ -229,7 +506,9 @@ def test_build_fact_article_source_rejects_articles_outside_analysis_window():
     Previously window_start/window_end were metadata-only fields with no DQ enforcement.
     This test ensures out-of-window rows land in the rejected table with an informative reason.
 
-    Note: 7 in-window + 2 out-of-window = 22% reject rate, safely below the 25% DQ threshold.
+    Note: 40 in-window + 2 out-of-window keeps the test below the configured
+    DQ reject-rate threshold while still proving both boundary violations are
+    quarantined.
     """
     window_start = date(2025, 11, 1)
     window_end = date(2026, 4, 30)
@@ -245,7 +524,7 @@ def test_build_fact_article_source_rejects_articles_outside_analysis_window():
             published_at="2026-01-15",  # inside [2025-11-01, 2026-04-30]
             outlet="Le Monde",
         )
-        for index in range(7)
+        for index in range(40)
     ]
     out_of_window_rows = [
         _make_bronze_row(
@@ -271,7 +550,7 @@ def test_build_fact_article_source_rejects_articles_outside_analysis_window():
         window_end=window_end,
     )
 
-    assert len(accepted_df) == 7, "Only in-window articles should be accepted"
+    assert len(accepted_df) == 40, "Only in-window articles should be accepted"
     assert len(rejected_df) == 2, "Both out-of-window articles must be quarantined"
     rejection_reasons = rejected_df["_rejection_reason"].tolist()
     assert all("outside analysis window" in reason for reason in rejection_reasons)
@@ -683,8 +962,8 @@ def test_build_fact_mentions_ignores_metadata_only_candidate_filename_evidence()
     assert manual_review_df.empty
 
 
-def test_build_mart_exposure_metrics_splits_full_text_and_metadata_only_counts():
-    """Regression: exposure keeps the denominator and separates text availability."""
+def test_mart_exposure_contract_splits_full_text_and_metadata_only_counts(tmp_path):
+    """Regression: exposure mart keeps denominator and text availability."""
     sample_leaders_df = pd.DataFrame(
         [
             {
@@ -729,21 +1008,53 @@ def test_build_mart_exposure_metrics_splits_full_text_and_metadata_only_counts()
             {
                 "leader_id": "leader-001",
                 "canonical_article_id": "article-full-text",
+                "mention_id": "mention-full-text",
                 "headline_mention_flag": True,
+                "frame_label": None,
+                "frame_score": None,
             },
             {
                 "leader_id": "leader-001",
                 "canonical_article_id": "article-metadata-only",
+                "mention_id": "mention-metadata-only",
                 "headline_mention_flag": False,
+                "frame_label": None,
+                "frame_score": None,
             },
         ]
     )
 
-    exposure_df = build_mart_exposure_metrics(
-        sample_leaders_df,
-        fact_article_df,
-        fact_mention_df,
-        dim_commune_df,
+    duckdb_path = tmp_path / "warehouse.duckdb"
+    write_duckdb_table(
+        dataframe=sample_leaders_df,
+        schema_name="gold",
+        table_name="sample_leaders",
+        duckdb_path=duckdb_path,
+    )
+    write_duckdb_table(
+        dataframe=dim_commune_df,
+        schema_name="silver",
+        table_name="dim_commune",
+        duckdb_path=duckdb_path,
+    )
+    write_duckdb_table(
+        dataframe=fact_article_df,
+        schema_name="silver",
+        table_name="fact_article",
+        duckdb_path=duckdb_path,
+    )
+    write_duckdb_table(
+        dataframe=fact_mention_df,
+        schema_name="silver",
+        table_name="fact_mention",
+        duckdb_path=duckdb_path,
+    )
+    _write_stub_dbt_news_marts(duckdb_path)
+
+    exposure_df = read_duckdb_table(
+        duckdb_path=duckdb_path,
+        schema_name="gold",
+        table_name="mart_exposure_metrics",
     )
     covered_row = exposure_df.loc[exposure_df["leader_id"] == "leader-001"].iloc[0]
     uncovered_rows = exposure_df.loc[exposure_df["leader_id"] != "leader-001"]
@@ -756,8 +1067,19 @@ def test_build_mart_exposure_metrics_splits_full_text_and_metadata_only_counts()
     assert uncovered_rows["article_count"].sum() == 0
 
 
-def test_run_news_corpus_etl_builds_24_row_exposure_mart(tmp_path):
+def test_run_news_corpus_etl_builds_24_row_exposure_mart(monkeypatch, tmp_path):
     """Integration: the main pipeline must preserve the full 24-candidate denominator."""
+    dbt_calls = []
+
+    def _recording_stub_dbt(*, duckdb_path: Path, **kwargs):
+        dbt_calls.append(str(duckdb_path))
+        _write_stub_dbt_news_marts(duckdb_path)
+
+    monkeypatch.setattr(
+        corpus_pipeline_module,
+        "run_dbt_news_marts",
+        _recording_stub_dbt,
+    )
     sample_leaders_df = pd.DataFrame(
         [
             {
@@ -821,6 +1143,7 @@ def test_run_news_corpus_etl_builds_24_row_exposure_mart(tmp_path):
         silver_dir=tmp_path / "silver",
         gold_dir=tmp_path / "gold",
         duckdb_path=tmp_path / "warehouse.duckdb",
+        bootstrap_resamples=60,
     )
 
     exposure_df = pd.read_parquet(tmp_path / "gold" / "mart_exposure_metrics.parquet")
@@ -829,6 +1152,7 @@ def test_run_news_corpus_etl_builds_24_row_exposure_mart(tmp_path):
     )
 
     assert result.row_counts["fact_article"] == 2
+    assert dbt_calls == [str(tmp_path / "warehouse.duckdb")]
     assert len(exposure_df) == 24
     assert exposure_df["article_count"].sum() == 2
     assert qa_report["qa"]["zero_coverage_leader_count"] == 22
@@ -836,7 +1160,6 @@ def test_run_news_corpus_etl_builds_24_row_exposure_mart(tmp_path):
 
 def test_build_mart_regression_results_includes_bloc_and_region_controls():
     """Regression: published model controls must be present in the fitted design."""
-    sample_rows = []
     exposure_rows = []
     leader_index = 1
     for city_size_bucket in ("small", "medium", "large"):
@@ -848,18 +1171,6 @@ def test_build_mart_regression_results_includes_bloc_and_region_controls():
                 leader_id = f"leader-{leader_index:03d}"
                 commune_insee = f"{leader_index:05d}"
                 gender = "F" if leader_index % 2 == 0 else "M"
-                sample_rows.append(
-                    {
-                        "leader_id": leader_id,
-                        "gender": gender,
-                        "commune_insee": commune_insee,
-                        "city_size_bucket": city_size_bucket,
-                        "reg_code": reg_code,
-                        "nuance_group": nuance_group,
-                        "is_incumbent": leader_index % 3 == 0,
-                        "won_final_round": leader_index % 4 == 0,
-                    }
-                )
                 exposure_rows.append(
                     {
                         "leader_id": leader_id,
@@ -881,10 +1192,16 @@ def test_build_mart_regression_results_includes_bloc_and_region_controls():
                 )
                 leader_index += 1
 
-    regression_feature_base_df = build_mart_regression_feature_base(
-        pd.DataFrame(sample_rows),
-        pd.DataFrame(exposure_rows),
-    )
+    regression_feature_base_df = pd.DataFrame(exposure_rows)
+    regression_feature_base_df["gender_female"] = (
+        regression_feature_base_df["gender"] == "F"
+    ).astype(int)
+    regression_feature_base_df["is_incumbent"] = regression_feature_base_df[
+        "is_incumbent"
+    ].astype(int)
+    regression_feature_base_df["won_final_round"] = regression_feature_base_df[
+        "won_final_round"
+    ].astype(int)
 
     regression_results_df = build_mart_regression_results(regression_feature_base_df)
 
@@ -931,7 +1248,7 @@ def test_build_regression_design_matrix_keeps_stable_column_order():
         ]
     )
 
-    design_matrix_df = marts_module._build_regression_design_matrix(modeling_df)
+    design_matrix_df = regression_module._build_regression_design_matrix(modeling_df)
 
     assert design_matrix_df.columns.tolist() == [
         "const",
@@ -940,15 +1257,40 @@ def test_build_regression_design_matrix_keeps_stable_column_order():
         "won_final_round",
         "bucket_large",
         "bucket_medium",
-        "restricted_source_article_count",
-        "supplemental_source_article_count",
         "nuance_group_gauche",
         "reg_code_84",
     ]
 
 
+def test_build_regression_design_matrix_excludes_source_provenance_counts():
+    """Regression: source provenance counters are not causal predictors."""
+    modeling_df = pd.DataFrame(
+        [
+            {
+                "gender_female": 1,
+                "is_incumbent": 0,
+                "won_final_round": 1,
+                "city_size_bucket": "small",
+                "restricted_source_article_count": 2,
+                "supplemental_source_article_count": 1,
+                "nuance_group": "centre",
+                "reg_code": "11",
+            }
+        ]
+    )
+
+    design_matrix_df = regression_module._build_regression_design_matrix(modeling_df)
+
+    assert "restricted_source_article_count" not in design_matrix_df.columns
+    assert "supplemental_source_article_count" not in design_matrix_df.columns
+
+
 def test_build_mart_regression_results_marks_fit_warnings(monkeypatch):
-    """Regression: statsmodel warnings must be surfaced in mart_regression_results."""
+    """Regression: statsmodel warnings must be surfaced in mart_regression_results.
+
+    Both Poisson and NegativeBinomial are mocked with the same FakeGLM so that
+    warnings emitted during fit() are captured in both model's status strings.
+    """
 
     class FakeFitResult:
         params = pd.Series({"const": 0.1, "gender_female": 0.2})
@@ -965,9 +1307,12 @@ def test_build_mart_regression_results_marks_fit_warnings(monkeypatch):
 
     fake_statsmodels = SimpleNamespace(
         GLM=FakeGLM,
-        families=SimpleNamespace(Poisson=lambda: object()),
+        families=SimpleNamespace(
+            Poisson=lambda: object(),
+            NegativeBinomial=lambda: object(),
+        ),
     )
-    monkeypatch.setattr(marts_module, "sm", fake_statsmodels)
+    monkeypatch.setattr(regression_module, "sm", fake_statsmodels)
 
     regression_feature_base_df = pd.DataFrame(
         [
@@ -1012,14 +1357,121 @@ def test_build_mart_regression_results_marks_fit_warnings(monkeypatch):
 
     regression_results_df = build_mart_regression_results(regression_feature_base_df)
 
-    assert regression_results_df["status"].nunique() == 1
+    # Both models are present and both must carry the warning status.
+    assert set(regression_results_df["model_name"].unique()) == {
+        "poisson_exposure",
+        "negbinom_exposure",
+    }
+    for model_name, model_rows_df in regression_results_df.groupby("model_name"):
+        assert (
+            model_rows_df["status"] == "fitted_with_warning:RuntimeWarning"
+        ).all(), f"{model_name} rows did not carry the expected warning status"
+
+
+def _make_feature_base(n_candidates: int = 20) -> pd.DataFrame:
+    """Build a minimal regression feature base for bootstrap tests.
+
+    Uses enough candidates (20) and enough region diversity (3 regions with
+    3+ members each) that sparse-region collapsing does not eliminate all
+    region dummies, while staying small enough for fast test runs.
+    """
+    rows = []
+    regions = ["11", "84", "76"]  # 3 regions, each gets ~6-7 candidates
+    nuances = ["gauche", "droite", "divers"]
+    for i in range(n_candidates):
+        gender = "F" if i % 2 == 0 else "M"
+        rows.append(
+            {
+                "leader_id": f"leader-{i:03d}",
+                "gender": gender,
+                "gender_female": 1 if gender == "F" else 0,
+                "commune_insee": f"{i:05d}",
+                "city_size_bucket": ["small", "medium", "large"][i % 3],
+                "reg_code": regions[i % 3],
+                "nuance_group": nuances[i % 3],
+                "is_incumbent": i % 4 == 0,
+                "won_final_round": i % 5 == 0,
+                "population": 10_000 + i * 1_000,
+                "article_count": max(1, (i % 7) * 10 + 5),
+                "headline_mention_count": i % 5,
+                "distinct_source_count": 1 + i % 3,
+                "restricted_source_article_count": i % 2,
+                "supplemental_source_article_count": 0,
+                "exposure_per_10k_population": float((i % 7) * 10 + 5),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_build_mart_bootstrap_ci_returns_expected_schema():
+    """Bootstrap CI: output must contain all documented columns with correct types."""
+    features_df = _make_feature_base()
+    ci_df = build_mart_bootstrap_ci(features_df, n_bootstrap=50, random_seed=0)
+
+    assert not ci_df.empty, "Bootstrap CI must return at least one row"
+    assert set(ci_df.columns) >= {
+        "variable_name",
+        "n_bootstrap",
+        "n_converged",
+        "observed_coef",
+        "ci_lower_95",
+        "ci_upper_95",
+        "ci_lower_90",
+        "ci_upper_90",
+        "bootstrap_std",
+        "ci_excludes_zero",
+        "fitted_at",
+    }
+    assert "gender_female" in ci_df["variable_name"].values
+    assert ci_df["n_bootstrap"].iloc[0] == 50
+    assert ci_df["ci_excludes_zero"].dtype == bool
+
+
+def test_build_mart_bootstrap_ci_ci_bounds_ordered():
+    """Bootstrap CI: lower bound must be <= observed coefficient <= upper bound (when CI is valid)."""
+    features_df = _make_feature_base()
+    ci_df = build_mart_bootstrap_ci(features_df, n_bootstrap=100, random_seed=1)
+
+    valid_rows = ci_df.dropna(subset=["ci_lower_95", "ci_upper_95"])
+    assert not valid_rows.empty, "At least some rows should have valid CIs"
     assert (
-        regression_results_df["status"].iloc[0] == "fitted_with_warning:RuntimeWarning"
+        valid_rows["ci_lower_95"] <= valid_rows["ci_upper_95"]
+    ).all(), "ci_lower_95 must be <= ci_upper_95 for all rows"
+    assert (
+        valid_rows["ci_lower_90"] <= valid_rows["ci_upper_90"]
+    ).all(), "ci_lower_90 must be <= ci_upper_90 for all rows"
+    # 90% CI must be strictly contained within 95% CI
+    assert (
+        valid_rows["ci_lower_90"] >= valid_rows["ci_lower_95"]
+    ).all(), "90% lower bound must be >= 95% lower bound"
+
+
+def test_build_mart_bootstrap_ci_reproducible_with_same_seed():
+    """Bootstrap CI: identical seed must produce bit-for-bit identical CIs (reproducibility contract)."""
+    features_df = _make_feature_base()
+    ci_a = build_mart_bootstrap_ci(features_df, n_bootstrap=50, random_seed=99)
+    ci_b = build_mart_bootstrap_ci(features_df, n_bootstrap=50, random_seed=99)
+
+    pd.testing.assert_frame_equal(
+        ci_a.drop(columns=["fitted_at"]),
+        ci_b.drop(columns=["fitted_at"]),
+        check_exact=True,
     )
 
 
-def test_run_news_corpus_etl_persists_redacted_text_artifacts(tmp_path):
+def test_build_mart_bootstrap_ci_empty_input_returns_empty():
+    """Bootstrap CI: empty feature base must return an empty DataFrame without error."""
+    ci_df = build_mart_bootstrap_ci(pd.DataFrame(), n_bootstrap=10, random_seed=0)
+    assert ci_df.empty
+
+
+def test_run_news_corpus_etl_persists_redacted_text_artifacts(monkeypatch, tmp_path):
     """Regression: persisted Parquet artifacts must not retain full article text."""
+    monkeypatch.setattr(
+        corpus_pipeline_module,
+        "run_dbt_news_marts",
+        lambda *, duckdb_path, **kwargs: _write_stub_dbt_news_marts(duckdb_path),
+    )
     sample_leaders_df = pd.DataFrame(
         [
             {
@@ -1073,6 +1525,7 @@ def test_run_news_corpus_etl_persists_redacted_text_artifacts(tmp_path):
         silver_dir=tmp_path / "silver",
         gold_dir=tmp_path / "gold",
         duckdb_path=tmp_path / "warehouse.duckdb",
+        bootstrap_resamples=60,
     )
 
     bronze_df = pd.read_parquet(

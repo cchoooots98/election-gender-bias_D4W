@@ -4,4 +4,3 @@
 transformers
 torch
 sentence-transformers
-dbt-duckdb

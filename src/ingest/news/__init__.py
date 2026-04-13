@@ -2,7 +2,7 @@
 
 The supported runnable path is:
 
-``Europresse export -> news import manifest -> corpus ETL -> marts``
+``Europresse export -> news import manifest -> corpus ETL -> dbt marts``
 
 Legacy provider-discovery experiments are intentionally excluded from the
 default import surface so the package API mirrors the project's current
@@ -18,13 +18,6 @@ from src.ingest.news.corpus import (
     write_news_import_manifest,
 )
 from src.ingest.news.corpus_pipeline import run_news_corpus_etl
-from src.ingest.news.marts import (
-    build_mart_bias_indicators,
-    build_mart_exposure_metrics,
-    build_mart_framing_metrics,
-    build_mart_regression_feature_base,
-    build_mart_regression_results,
-)
 from src.ingest.news.matching import build_fact_mentions
 from src.ingest.news.models import (
     ImportBatchFile,
@@ -43,11 +36,6 @@ __all__ = [
     "build_fact_article",
     "build_fact_article_source",
     "build_fact_mentions",
-    "build_mart_bias_indicators",
-    "build_mart_exposure_metrics",
-    "build_mart_framing_metrics",
-    "build_mart_regression_feature_base",
-    "build_mart_regression_results",
     "canonicalize_url",
     "inspect_import_batch",
     "load_news_import_manifest",

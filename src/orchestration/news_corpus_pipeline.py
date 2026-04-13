@@ -49,6 +49,7 @@ def run_news_corpus_pipeline(
     gold_dir: Path = GOLD_DIR,
     duckdb_path: Path = WAREHOUSE_PATH,
     enable_web_scrape: bool = False,
+    bootstrap_resamples: int = 2000,
 ) -> NewsCorpusRunResult:
     """Run the Europresse corpus pipeline and record observability metadata.
 
@@ -61,6 +62,7 @@ def run_news_corpus_pipeline(
         gold_dir: Gold output root.
         duckdb_path: DuckDB warehouse path.
         enable_web_scrape: Whether this run may fetch uncached web article URLs.
+        bootstrap_resamples: Number of bootstrap resamples for regression CIs.
 
     Returns:
         Summary object with materialized row counts and artifact paths.
@@ -83,6 +85,7 @@ def run_news_corpus_pipeline(
             gold_dir=gold_dir,
             duckdb_path=duckdb_path,
             enable_web_scrape=enable_web_scrape,
+            bootstrap_resamples=bootstrap_resamples,
         )
         status = result.status
         execution_run_id = result.run_id
@@ -108,6 +111,8 @@ def run_news_corpus_pipeline(
         )
         return result
     except Exception:
+        # Broad catch is intentional: any crash must be logged and then re-raised
+        # so the finally block still records a failed meta_run audit row.
         logger.exception(
             "News corpus pipeline failed batch_id=%s manifest=%s",
             manifest.batch_id,

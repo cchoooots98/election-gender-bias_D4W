@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 # different interpreter or toolchain than the one the repository expects.
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$Dbt = Join-Path $RepoRoot ".venv\Scripts\dbt.exe"
 
 if (-not (Test-Path $Python)) {
     throw "Missing .venv interpreter at $Python. Create or rebuild .venv before running development commands."
@@ -47,6 +48,9 @@ switch ($Command) {
         Write-Host "  compile"
         Write-Host "  notebook"
         Write-Host "  dashboard"
+        Write-Host "  dbt-run"
+        Write-Host "  dbt-test"
+        Write-Host "  dbt-build"
         Write-Host "  run-sampling-pipeline"
         Write-Host "  run-news-corpus-pipeline"
     }
@@ -77,6 +81,15 @@ switch ($Command) {
     }
     "dashboard" {
         Invoke-ProjectCommand $Python @("-m", "streamlit", "run", "src/dashboard/app.py")
+    }
+    "dbt-run" {
+        Invoke-ProjectCommand $Dbt @("run", "--project-dir", "dbt", "--profiles-dir", "dbt", "--select", "marts.news")
+    }
+    "dbt-test" {
+        Invoke-ProjectCommand $Dbt @("test", "--project-dir", "dbt", "--profiles-dir", "dbt", "--select", "marts.news")
+    }
+    "dbt-build" {
+        Invoke-ProjectCommand $Dbt @("build", "--project-dir", "dbt", "--profiles-dir", "dbt", "--select", "marts.news")
     }
     "run-sampling-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_sampling_pipeline")

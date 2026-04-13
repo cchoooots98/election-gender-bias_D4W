@@ -39,6 +39,9 @@ warehouse/*.duckdb*
 # dbt
 dbt/.user.yml
 dbt/profiles.yml
+!dbt/profiles.yml
+dbt/target/
+dbt/dbt_packages/
 
 # Airflow local runtime artifacts (keep dags/ in git, ignore runtime state)
 airflow/logs/

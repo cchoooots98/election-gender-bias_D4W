@@ -11,12 +11,12 @@
 The project currently implements a **runnable official-data + news-corpus
 slice** of the broader research design:
 
-`Bronze official data/news imports -> Silver dimensions/facts -> Gold cohort + marts`
+`Bronze official data/news imports -> Silver dimensions/facts -> DuckDB -> dbt Gold marts -> Python regression diagnostics`
 
 The executable repository now materializes the 36-person viable-candidate
-cohort, the Europresse-first news corpus backbone, and the first exposure /
-regression audit marts. The transformer-based NLP enrichment stack remains the
-main planned extension.
+cohort, the Europresse-first news corpus backbone, dbt-owned exposure/summary
+marts, and Python-owned regression/bootstrap diagnostics. The transformer-based
+NLP enrichment stack remains the main planned extension.
 
 Active news-analysis window for the implemented corpus slice:
 `2025-11-01` to `2026-04-30`.
@@ -27,7 +27,7 @@ The implemented layers are:
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
 | Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, and quarantine outputs |
-| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_regression_results` |
+| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
 ---
@@ -45,6 +45,10 @@ rather than raw operational tables.
 This follows an enterprise-friendly rule set:
 - Bronze is replayable.
 - Silver is validated and idempotent.
+- dbt owns SQL-friendly Gold marts so metric definitions are versioned, tested,
+  and documented close to the SQL.
+- Python owns statistical fitting and bootstrap diagnostics, which are not a
+  natural fit for SQL.
 - Gold is stable for downstream consumers.
 - Meta tables provide auditability and rerun visibility.
 
@@ -466,6 +470,7 @@ Modeling note:
 ### `gold.mart_exposure_metrics`
 
 - Grain: one row per sampled leader
+- Owner: dbt model `dbt/models/marts/news/mart_exposure_metrics.sql`
 - Source: `gold.sample_leaders`, `silver.fact_article`, `silver.fact_mention`,
   `silver.dim_commune`
 - Role: leader-level coverage denominator with article counts, headline mentions,
@@ -482,15 +487,24 @@ Modeling note:
 - Denominator contract: the mart still keeps one row per sampled leader, so the
   active 36-person cohort denominator is preserved even for zero-coverage
   leaders.
+- Provenance contract: `restricted_source_article_count` and
+  `supplemental_source_article_count` are source QA/provenance counters. They
+  are retained for auditability but excluded from regression predictors.
 
 ### `gold.mart_framing_metrics`
 
+- Owner: dbt model `dbt/models/marts/news/mart_framing_metrics.sql`
+
 - Grain: one row per sampled leader × frame label
 - Source: `silver.fact_mention`
-- Role: current placeholder mart for framing aggregation; rows remain sparse until
-  the richer NLP frame scorer is wired into `fact_mention`
+- Role: NLP pending contract. The current baseline stabilizes the table shape
+  with `unclassified` rows only; it does not support framing or tone
+  conclusions until the transformer NLP scorer writes frame labels and scores
+  into `fact_mention`.
 
 ### `gold.mart_bias_indicators`
+
+- Owner: dbt model `dbt/models/marts/news/mart_bias_indicators.sql`
 
 - Grain: one row per gender × exposure metric
 - Source: `gold.mart_exposure_metrics`
@@ -498,19 +512,43 @@ Modeling note:
 
 ### `gold.mart_regression_feature_base`
 
+- Owner: dbt model `dbt/models/marts/news/mart_regression_feature_base.sql`
+
 - Grain: one row per sampled leader
-- Source: `gold.sample_leaders` joined with `gold.mart_exposure_metrics`
-- Role: stable modeling base that materializes the documented regression controls
-  (`gender`, `city_size_bucket`, `nuance_group`, `is_incumbent`, `reg_code`)
+- Source: `gold.mart_exposure_metrics`
+- Role: stable modeling base consumed by Python statsmodels diagnostics. It
+  keeps one row per leader and materializes documented controls (`gender`,
+  `city_size_bucket`, `nuance_group`, `is_incumbent`, `reg_code`,
+  `won_final_round`).
+
+### `gold.mart_analysis_summary`
+
+- Grain: one row per analysis, dimension, group label, and metric
+- Owner: dbt model `dbt/models/marts/news/mart_analysis_summary.sql`
+- Source: `gold.mart_exposure_metrics`
+- Role: long-form dashboard summary table so Streamlit displays metric results
+  rather than recomputing analytical definitions at render time.
+- Key contract: `analysis_id` is a unique row-level identifier; related rows
+  are grouped by `analysis_section_id` (for example `A1` for exposure
+  distribution).
 
 ### `gold.mart_regression_results`
 
 - Grain: one row per model coefficient
+- Owner: Python module `src.metrics.news.regression`
 - Source: `gold.mart_regression_feature_base`
-- Role: persisted Poisson exposure-model audit output
+- Role: persisted Poisson and Negative Binomial exposure-model audit output
 - Status contract: each row carries a `status` field such as `fitted`,
   `fitted_with_warning:*`, or `fit_failed:*` so statistical warnings remain
   visible in downstream audit artifacts
+
+### `gold.mart_bootstrap_ci`
+
+- Grain: one row per bootstrap coefficient
+- Owner: Python module `src.metrics.news.regression`
+- Source: `gold.mart_regression_feature_base`
+- Role: empirical confidence interval diagnostic for the Negative Binomial
+  exposure model. The fixed random seed makes re-runs reproducible.
 
 ### `data/gold/news_corpus_qa_report.json`
 
@@ -592,6 +630,10 @@ silver.dim_candidate_leader (leader_id PK)
                       +--< gold.mart_exposure_metrics (leader_id PK)
                       |
                       +--< gold.mart_regression_feature_base (leader_id PK)
+                             |
+                             +--< gold.mart_regression_results
+                             |
+                             +--< gold.mart_bootstrap_ci
 
 silver.fact_article (canonical_article_id PK)
     |
@@ -614,4 +656,5 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_source_snapshot` | Implemented | No immediate action |
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
+| dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
 | NLP fact tables and marts | Partially implemented | `fact_mention`/framing scaffolding exists; add transformer enrichments next |

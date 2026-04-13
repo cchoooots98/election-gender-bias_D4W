@@ -29,12 +29,14 @@ pandas          # DataFrame manipulation at silver/gold boundaries
 numpy           # Numerical helpers for metrics and regression prep
 scipy           # Statistical tests
 statsmodels     # Poisson regression audit layer
+dbt-duckdb      # Version-controlled SQL mart layer on the local DuckDB warehouse
 
 # Dashboard
 streamlit       # Python-native dashboard
 
 # Visualization
 matplotlib      # Base plotting library
+plotly          # Interactive charts for Streamlit dashboard
 seaborn         # Statistical visualization on top of matplotlib
 
 # Dev / quality tools
@@ -45,5 +47,5 @@ pytest-cov      # Coverage plugin backing the documented test-coverage command
 pip-tools       # Provides pip-compile for lockfile generation
 
 # Optional future stack
-# Transformer NLP models and dbt stay out of the default environment until the
+# Transformer NLP models stay out of the default environment until the
 # corresponding production modules are committed to this repository.

@@ -3,8 +3,8 @@
 Responsibility
 --------------
 This module parses a ``NewsImportManifest`` for a local Europresse export,
-deduplicates canonical articles, matches sampled candidates, and materialises
-all Silver and Gold analytical tables.
+deduplicates canonical articles, matches sampled candidates, writes Silver
+tables, runs dbt-owned Gold marts, and fits Python regression diagnostics.
 
 Typical calling sequence (from orchestration layer)
 ----------------------------------------------------
@@ -17,9 +17,10 @@ Output tables
 Bronze  : ``news_source_record``
 Silver  : ``fact_article_source``, ``fact_article``, ``fact_mention``,
           ``manual_review_candidate_match``, ``_rejected/*``
-Gold    : ``mart_exposure_metrics``, ``mart_framing_metrics``,
+Gold    : dbt-owned ``mart_exposure_metrics``, ``mart_framing_metrics``,
           ``mart_bias_indicators``, ``mart_regression_feature_base``,
-          ``mart_regression_results``
+          ``mart_analysis_summary`` plus Python-owned
+          ``mart_regression_results`` and ``mart_bootstrap_ci``
 """
 
 from __future__ import annotations
@@ -44,17 +45,19 @@ from src.ingest.news.corpus_storage import (
     write_json_report,
     write_parquet_table,
 )
-from src.ingest.news.marts import (
-    build_mart_bias_indicators,
-    build_mart_exposure_metrics,
-    build_mart_framing_metrics,
-    build_mart_regression_feature_base,
-    build_mart_regression_results,
-    run_news_corpus_quality_checks,
-)
 from src.ingest.news.matching import build_fact_mentions
 from src.ingest.news.models import NewsCorpusRunResult
 from src.ingest.news.normalize import stable_md5 as _stable_md5
+from src.metrics.news.dbt_runner import (
+    export_duckdb_tables_to_parquet,
+    read_duckdb_table,
+    run_dbt_news_marts,
+)
+from src.metrics.news.quality import run_news_corpus_quality_checks
+from src.metrics.news.regression import (
+    build_mart_bootstrap_ci,
+    build_mart_regression_results,
+)
 
 logger = logging.getLogger(__name__)
 _PERSISTED_TEXT_PREVIEW_CHARS = 280
@@ -103,6 +106,7 @@ def run_news_corpus_etl(
     gold_dir: Path = GOLD_DIR,
     duckdb_path: Path = WAREHOUSE_PATH,
     enable_web_scrape: bool = False,
+    bootstrap_resamples: int = 2000,
 ) -> NewsCorpusRunResult:
     """Run the enterprise news corpus ETL and materialize all main artifacts.
 
@@ -115,6 +119,7 @@ def run_news_corpus_etl(
         gold_dir: Gold output root.
         duckdb_path: Warehouse path.
         enable_web_scrape: Whether this run may fetch uncached web article URLs.
+        bootstrap_resamples: Number of bootstrap resamples for regression CIs.
 
     Returns:
         Summary object with status, row counts, and artifact paths.
@@ -161,35 +166,9 @@ def run_news_corpus_etl(
         fact_article_df,
         sample_leaders_df,
     )
-
-    mart_exposure_metrics_df = build_mart_exposure_metrics(
-        sample_leaders_df,
-        fact_article_df,
-        fact_mention_df,
-        dim_commune_df,
-    )
-    mart_framing_metrics_df = build_mart_framing_metrics(
-        sample_leaders_df,
-        fact_mention_df,
-    )
-    mart_bias_indicators_df = build_mart_bias_indicators(mart_exposure_metrics_df)
-    mart_regression_feature_base_df = build_mart_regression_feature_base(
-        sample_leaders_df,
-        mart_exposure_metrics_df,
-    )
-    mart_regression_results_df = build_mart_regression_results(
-        mart_regression_feature_base_df
-    )
-    qa_report = run_news_corpus_quality_checks(
-        sample_leaders_df=sample_leaders_df,
-        fact_article_source_df=fact_article_source_df,
-        fact_article_source_rejected_df=rejected_source_df,
-        fact_article_df=fact_article_df,
-        fact_mention_df=fact_mention_df,
-        mart_exposure_metrics_df=mart_exposure_metrics_df,
-        mart_regression_results_df=mart_regression_results_df,
-        web_enrichment_report=web_enrichment_report,
-    )
+    for optional_control_column in ("is_incumbent", "won_final_round"):
+        if optional_control_column not in sample_leaders_df.columns:
+            sample_leaders_df[optional_control_column] = False
 
     persisted_bronze_source_df = _prepare_persisted_text_table(
         bronze_source_df,
@@ -207,7 +186,27 @@ def run_news_corpus_etl(
     artifact_paths: list[str] = [str(import_manifest_path)]
     if web_fetch_cache_written or web_fetch_cache_path.exists():
         artifact_paths.append(str(web_fetch_cache_path))
-    parquet_specs = [
+    source_table_specs = [
+        (
+            sample_leaders_df,
+            "gold",
+            "sample_leaders",
+        ),
+        (
+            dim_commune_df,
+            "silver",
+            "dim_commune",
+        ),
+    ]
+    for dataframe, schema_name, table_name in source_table_specs:
+        write_duckdb_table(
+            dataframe=dataframe,
+            schema_name=schema_name,
+            table_name=table_name,
+            duckdb_path=duckdb_path,
+        )
+
+    silver_parquet_specs = [
         (
             persisted_bronze_source_df,
             bronze_dir
@@ -254,39 +253,9 @@ def run_news_corpus_etl(
             "silver",
             "news_import_unsupported",
         ),
-        (
-            mart_exposure_metrics_df,
-            gold_dir / "mart_exposure_metrics.parquet",
-            "gold",
-            "mart_exposure_metrics",
-        ),
-        (
-            mart_framing_metrics_df,
-            gold_dir / "mart_framing_metrics.parquet",
-            "gold",
-            "mart_framing_metrics",
-        ),
-        (
-            mart_bias_indicators_df,
-            gold_dir / "mart_bias_indicators.parquet",
-            "gold",
-            "mart_bias_indicators",
-        ),
-        (
-            mart_regression_feature_base_df,
-            gold_dir / "mart_regression_feature_base.parquet",
-            "gold",
-            "mart_regression_feature_base",
-        ),
-        (
-            mart_regression_results_df,
-            gold_dir / "mart_regression_results.parquet",
-            "gold",
-            "mart_regression_results",
-        ),
     ]
 
-    for dataframe, parquet_path, schema_name, table_name in parquet_specs:
+    for dataframe, parquet_path, schema_name, table_name in silver_parquet_specs:
         write_parquet_table(dataframe, parquet_path)
         write_duckdb_table(
             dataframe=dataframe,
@@ -295,6 +264,74 @@ def run_news_corpus_etl(
             duckdb_path=duckdb_path,
         )
         artifact_paths.append(str(parquet_path))
+
+    run_dbt_news_marts(duckdb_path=duckdb_path)
+    dbt_mart_names = [
+        "mart_exposure_metrics",
+        "mart_framing_metrics",
+        "mart_bias_indicators",
+        "mart_regression_feature_base",
+        "mart_analysis_summary",
+    ]
+    exported_dbt_paths = export_duckdb_tables_to_parquet(
+        duckdb_path=duckdb_path,
+        schema_name="gold",
+        table_names=dbt_mart_names,
+        output_dir=gold_dir,
+    )
+    artifact_paths.extend(str(path) for path in exported_dbt_paths.values())
+
+    mart_exposure_metrics_df = read_duckdb_table(
+        duckdb_path=duckdb_path,
+        schema_name="gold",
+        table_name="mart_exposure_metrics",
+    )
+    mart_regression_feature_base_df = read_duckdb_table(
+        duckdb_path=duckdb_path,
+        schema_name="gold",
+        table_name="mart_regression_feature_base",
+    )
+    mart_regression_results_df = build_mart_regression_results(
+        mart_regression_feature_base_df
+    )
+    mart_bootstrap_ci_df = build_mart_bootstrap_ci(
+        mart_regression_feature_base_df,
+        n_bootstrap=bootstrap_resamples,
+    )
+    python_gold_specs = [
+        (
+            mart_regression_results_df,
+            gold_dir / "mart_regression_results.parquet",
+            "gold",
+            "mart_regression_results",
+        ),
+        (
+            mart_bootstrap_ci_df,
+            gold_dir / "mart_bootstrap_ci.parquet",
+            "gold",
+            "mart_bootstrap_ci",
+        ),
+    ]
+    for dataframe, parquet_path, schema_name, table_name in python_gold_specs:
+        write_parquet_table(dataframe, parquet_path)
+        write_duckdb_table(
+            dataframe=dataframe,
+            schema_name=schema_name,
+            table_name=table_name,
+            duckdb_path=duckdb_path,
+        )
+        artifact_paths.append(str(parquet_path))
+
+    qa_report = run_news_corpus_quality_checks(
+        sample_leaders_df=sample_leaders_df,
+        fact_article_source_df=fact_article_source_df,
+        fact_article_source_rejected_df=rejected_source_df,
+        fact_article_df=fact_article_df,
+        fact_mention_df=fact_mention_df,
+        mart_exposure_metrics_df=mart_exposure_metrics_df,
+        mart_regression_results_df=mart_regression_results_df,
+        web_enrichment_report=web_enrichment_report,
+    )
 
     qa_report_path = write_json_report(
         {
@@ -323,6 +360,9 @@ def run_news_corpus_etl(
         "fact_mention": int(len(fact_mention_df)),
         "manual_review_candidate_match": int(len(manual_review_df)),
         "mart_exposure_metrics": int(len(mart_exposure_metrics_df)),
+        "mart_regression_feature_base": int(len(mart_regression_feature_base_df)),
+        "mart_regression_results": int(len(mart_regression_results_df)),
+        "mart_bootstrap_ci": int(len(mart_bootstrap_ci_df)),
     }
     partial_signal_count = sum(
         1

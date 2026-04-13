@@ -1,0 +1,24 @@
+name: election_gender_bias_d4w
+version: "1.0.0"
+config-version: 2
+
+profile: election_gender_bias_d4w
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  election_gender_bias_d4w:
+    marts:
+      +materialized: table
+      news:
+        +schema: gold

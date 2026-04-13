@@ -1,0 +1,213 @@
+version: 2
+
+models:
+  - name: mart_exposure_metrics
+    description: "Leader-grain exposure mart built by dbt from Silver news corpus tables."
+    tests:
+      - row_count_equals:
+          arguments:
+            compare_model: "{{ source('gold', 'sample_leaders') }}"
+    columns:
+      - name: leader_id
+        description: "Stable sampled candidate leader identifier."
+        tests:
+          - not_null
+          - unique
+      - name: gender
+        description: "Official candidate gender code."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["F", "M"]
+      - name: commune_insee
+        description: "INSEE commune code for the candidate leader's municipality."
+        tests:
+          - not_null
+      - name: city_size_bucket
+        description: "Sampling stratum used to control city-size confounding."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["large", "medium", "small"]
+      - name: reg_code
+        description: "French region code retained for regression controls."
+        tests:
+          - not_null
+      - name: nuance_group
+        description: "Collapsed political bloc used for cohort balance and modeling controls."
+        tests:
+          - not_null
+      - name: is_incumbent
+        description: "Boolean incumbency control, normalized before modeling."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+      - name: won_final_round
+        description: "Boolean final-round win flag, retained for descriptive comparisons."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+      - name: population
+        description: "Municipal population used as the exposure-rate denominator."
+        tests:
+          - not_null
+      - name: article_count
+        description: "Distinct canonical articles mentioning the sampled leader."
+        tests:
+          - not_null
+      - name: headline_mention_count
+        description: "Distinct canonical articles where the leader appears in the headline."
+        tests:
+          - not_null
+      - name: distinct_source_count
+        description: "Distinct normalized media outlets covering the sampled leader."
+        tests:
+          - not_null
+      - name: restricted_source_article_count
+        description: "Source provenance count for restricted local subscription rows; not a regression control."
+        tests:
+          - not_null
+      - name: supplemental_source_article_count
+        description: "Source provenance count for supplemental acquisition rows; not a regression control."
+        tests:
+          - not_null
+      - name: full_text_article_count
+        description: "Canonical articles with local transient full-text available during processing."
+        tests:
+          - not_null
+      - name: metadata_only_article_count
+        description: "Canonical articles represented by redacted metadata only in persisted artifacts."
+        tests:
+          - not_null
+      - name: has_full_text
+        description: "Whether the leader has at least one article with transient local full-text."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+                quote: false
+      - name: exposure_per_10k_population
+        description: "Article count normalized per 10,000 municipal residents."
+        tests:
+          - not_null
+
+  - name: mart_bias_indicators
+    description: "Gender-level exposure summary metrics for dashboard KPI blocks."
+    tests:
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - gender
+              - metric_name
+    columns:
+      - name: gender
+        description: "Official candidate gender code for the aggregate group."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["F", "M"]
+      - name: metric_name
+        description: "Name of the gender-level exposure metric."
+        tests:
+          - not_null
+      - name: metric_value
+        description: "Numeric metric value for the gender and metric_name combination."
+        tests:
+          - not_null
+
+  - name: mart_regression_feature_base
+    description: "One-row-per-leader modeling base consumed by Python statsmodels diagnostics."
+    tests:
+      - row_count_equals:
+          arguments:
+            compare_model: "{{ source('gold', 'sample_leaders') }}"
+    columns:
+      - name: leader_id
+        tests:
+          - not_null
+          - unique
+      - name: gender
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["F", "M"]
+      - name: gender_female
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+
+  - name: mart_analysis_summary
+    description: "Long-form dashboard summary table; one row per analysis, dimension, group, and metric."
+    columns:
+      - name: analysis_id
+        description: "Unique row-level summary identifier derived from analysis section, dimension, group, and metric."
+        tests:
+          - not_null
+          - unique
+      - name: analysis_section_id
+        description: "Reusable section identifier grouping related dashboard metrics."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["A1", "A2", "A3", "A4"]
+      - name: analysis_name
+        description: "Human-readable dashboard analysis section name."
+        tests:
+          - not_null
+      - name: dimension
+        description: "Dimension used to group the summary metric."
+        tests:
+          - not_null
+      - name: group_label
+        description: "Human-readable group label for the dimension slice."
+        tests:
+          - not_null
+      - name: metric_name
+        description: "Summary metric name."
+        tests:
+          - not_null
+      - name: metric_value
+        description: "Numeric summary metric value."
+        tests:
+          - not_null
+      - name: note
+        description: "Optional explanatory note for dashboard interpretation."
+
+  - name: mart_framing_metrics
+    description: "NLP pending contract. Baseline row shape only; no tone or framing claim yet."
+    tests:
+      - row_count_equals_multiple:
+          arguments:
+            compare_model: "{{ source('gold', 'sample_leaders') }}"
+            multiplier: 7
+    columns:
+      - name: leader_id
+        tests:
+          - not_null
+      - name: frame_label
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - politique
+                  - vie_privee
+                  - apparence
+                  - scandale
+                  - personnalite
+                  - securite
+                  - unclassified

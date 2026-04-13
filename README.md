@@ -111,12 +111,90 @@ The analysis is organised around three layers:
 
 ---
 
+## Key Findings
+
+### Data coverage
+
+The corpus covers all 36 cohort candidates with no zero-coverage leaders.
+4,023 Europresse source records were ingested; 4 were rejected at the parsing
+stage (rejection rate: 0.1%), yielding 3,735 canonical articles and 3,392
+candidate mentions.
+
+### Exposure — raw article counts
+
+Male candidates received on average **130 articles** versus **58 articles**
+for female candidates (ratio 2.2x) across the analysis window.
+
+This raw gap is largely explained by two confounding factors:
+
+- **Incumbent status.** Incumbent male candidates averaged 475 articles versus
+  131 for incumbent female candidates. Incumbents attract disproportionate
+  press volume regardless of gender.
+- **City size.** The three large-city male candidates averaged 603 articles
+  each, driven by one sitting mayor with 1,277 articles — nearly 40% of the
+  entire male corpus. Large communes generate higher absolute press volume by
+  construction; the sample contains more high-volume male incumbents in that
+  stratum.
+
+Within the small-city stratum — where incumbent composition is most balanced —
+the raw article counts are nearly equal: male 27.4 articles vs. female 29.8
+articles on average.
+
+### Exposure — population-adjusted rate
+
+After dividing by commune population (articles per 10,000 residents), the
+direction reverses at the overall level: female candidates average **32.7**
+per 10k vs. **27.5** for male candidates. This reversal is itself a
+city-size artefact: small-commune candidates produce high per-capita rates by
+construction (small denominator), and the small-city stratum is gender-balanced.
+
+The most informative signal at this level comes from the **medium-city
+stratum**, where female candidates average 22.1 per 10k versus 9.6 for male
+candidates — a 2.3x female advantage that is not explained by incumbent
+composition (5F non-incumbent vs. 5M non-incumbent in that stratum).
+
+### Regression — directional audit
+
+A Poisson regression on article count, controlling for city-size bucket,
+region fixed effects, political bloc, incumbent status, and election outcome,
+produces a `gender_female` coefficient of **+0.229 (SE = 0.078, p = 0.003)**,
+corresponding to an incidence rate ratio of approximately **1.26**. Within
+this model specification, female candidacy is associated with 26% more
+articles than male candidacy after controlling for the listed covariates.
+
+**This result should be read as a directional audit signal, not a causal
+claim.** The sample size is n = 36; the Poisson model may underestimate
+standard errors due to overdispersion. The dashboard therefore compares Poisson,
+Negative Binomial, and bootstrap confidence intervals. Under the more cautious
+diagnostics, the direction is positive but uncertain rather than confirmed.
+
+### Framing and tone
+
+Framing and sentiment classification require transformer-based NLP inference
+(CamemBERT-NLI) and are not yet implemented in the runnable repository slice.
+All 3,392 mentions are currently unclassified. This layer is the primary
+planned extension; see the roadmap in **Status** below.
+
+---
+
+## Limitations
+
+| Limitation | Detail |
+|---|---|
+| **Single source** | All news data comes from Europresse, a subscription-based press aggregator. It covers major French dailies and regionals but excludes pure-digital outlets, social media, and broadcast transcripts. Coverage is not representative of the full French media ecosystem. |
+| **Matched cohort, not national sample** | The 36-candidate cohort is a stratified matched sample designed for controlled gender comparison, not for national-level inference. Findings describe this cohort; they cannot be extrapolated to all French municipal candidates. |
+| **Small n** | With n = 36, regression estimates are sensitive to individual high-leverage candidates (notably one large-city incumbent with 1,277 articles). Standard errors may be underestimated under Poisson equidispersion assumptions. |
+| **Framing not yet implemented** | The NLP pipeline (NER, sentiment, NLI frame classification) is a planned extension. No framing or tone conclusions can be drawn from the current corpus. |
+| **Observational design** | No causal claims are warranted. Associations between gender and coverage volume may reflect unmeasured confounders not captured by the available covariates. |
+
+---
+
 ## Status
 
 > **Runnable end to end for the implemented slice.** The repository now
 > implements official-data ingest, the 36-candidate viable-cohort sampler, the
-> Europresse-first news corpus ETL, exposure marts, a lightweight regression
-> audit layer, and the Streamlit dashboard. The transformer-based NLP
+> Europresse-first news corpus ETL, dbt-owned exposure/summary marts, a Python
+> regression/bootstrap audit layer, and the Streamlit dashboard. The transformer-based NLP
 > enrichment stack remains the main planned extension.
 
 ---
@@ -137,6 +215,7 @@ Examples:
 ```powershell
 .\scripts\dev.ps1 lint
 .\scripts\dev.ps1 test
+.\scripts\dev.ps1 dbt-build
 .\scripts\dev.ps1 run-sampling-pipeline
 .\scripts\dev.ps1 run-news-corpus-pipeline
 ```
@@ -147,16 +226,17 @@ If PowerShell blocks local scripts, run the same command through:
 ```bash
 make lint
 make test
+make dbt-build
 make run-sampling-pipeline
 make run-news-corpus-pipeline
 ```
 
 Both entrypoints are pinned to the project-local `.venv`, not the system PATH.
 
-The default environment intentionally stays lean and matches the implemented
-repository surface. Optional future-only dependencies (transformer NLP and dbt)
-are split into [`requirements-future.in`](requirements-future.in) so that local
-installs and CI do not pay for features that are not yet committed.
+The default environment intentionally matches the implemented repository
+surface. dbt-duckdb is part of the runnable stack because SQL-friendly Gold
+marts are now committed under `dbt/`. Transformer NLP dependencies remain
+future-only in [`requirements-future.in`](requirements-future.in).
 
 ---
 
@@ -169,7 +249,7 @@ the standard pattern in modern data engineering (Databricks, dbt, Snowflake).
 |---|---|---|
 | **Bronze** | Faithful raw copies, append-only | `news_source_record`, `candidates_tour1/2`, `results_tour1/2`, `cog_communes`, `seats_population`, `rne_incumbents` |
 | **Silver** | Cleaned, validated, analysis-ready | `dim_commune`, `dim_candidate_leader`, `fact_election_result`, `fact_article_source`, `fact_article`, `fact_mention`, `fact_stereotype_word_counts` |
-| **Gold** | Consumer marts + cohort snapshot for dashboard | `candidate_universe`, `sample_leaders`, `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_results` |
+| **Gold** | Consumer marts + cohort snapshot for dashboard | `candidate_universe`, `sample_leaders`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
 | **Meta** | Pipeline observability | `meta_run`, `meta_source_snapshot` |
 
 The central fact table is **`fact_mention`** (grain: one article x one
@@ -220,10 +300,13 @@ flowchart LR
     subgraph GLD["Gold"]
         G0["candidate_universe"]
         G1["sample_leaders"]
-        G2["mart_exposure_metrics"]
-        G3["mart_framing_metrics"]
-        G4["mart_bias_indicators"]
-        G5["mart_regression_results"]
+        G2["dbt: mart_exposure_metrics"]
+        G3["dbt: mart_framing_metrics<br>NLP pending"]
+        G4["dbt: mart_bias_indicators"]
+        G5["dbt: mart_regression_feature_base"]
+        G6["dbt: mart_analysis_summary"]
+        G7["Python: mart_regression_results"]
+        G8["Python: mart_bootstrap_ci"]
     end
 
     A1 --> B1
@@ -239,15 +322,16 @@ flowchart LR
     F2 --> NLP
     NLP --> F3 & F4
 
-    G1 & F3 --> G2 & G3 & G4 & G5
-    G2 & G3 & G4 & G5 --> DASH["Streamlit Dashboard"]
+    G1 & F3 --> G2 & G3 & G4 & G5 & G6
+    G5 --> G7 & G8
+    G2 & G3 & G4 & G6 & G7 & G8 --> DASH["Streamlit Dashboard"]
 ```
 
 **Implementation note.** The runnable repository currently materializes
 `gold.candidate_universe`, `gold.sample_leaders`, the canonical news corpus backbone
-(`fact_article_source`, `fact_article`, `fact_mention`), and the exposure / regression audit marts. The transformer
-NLP blocks shown above remain planned extensions on top of that implemented
-slice.
+(`fact_article_source`, `fact_article`, `fact_mention`), dbt-owned exposure
+and summary marts, and Python-owned regression diagnostics. The transformer NLP
+blocks shown above remain planned extensions on top of that implemented slice.
 
 ### Silver Layer - Entity Relationships
 

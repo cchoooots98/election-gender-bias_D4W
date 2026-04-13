@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: silver
+    schema: silver
+    tables:
+      - name: dim_commune
+      - name: fact_article
+      - name: fact_mention
+
+  - name: gold
+    schema: gold
+    tables:
+      - name: sample_leaders

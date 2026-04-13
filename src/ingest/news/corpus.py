@@ -2042,10 +2042,10 @@ def build_fact_article_source(
     rejected_df = pd.DataFrame(rejected_rows, columns=_SOURCE_REJECTED_COLUMNS)
 
     reject_rate = len(rejected_df) / max(len(bronze_news_source_record_df), 1)
-    if reject_rate > max(DQ_MAX_NULL_RATE, 0.25):
+    if reject_rate > DQ_MAX_NULL_RATE:
         raise DataQualityError(
             f"fact_article_source reject rate {reject_rate:.1%} exceeds threshold "
-            f"{max(DQ_MAX_NULL_RATE, 0.25):.1%}"
+            f"{DQ_MAX_NULL_RATE:.1%}"
         )
 
     return accepted_df, rejected_df
