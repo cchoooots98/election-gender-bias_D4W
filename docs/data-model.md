@@ -15,8 +15,9 @@ slice** of the broader research design:
 
 The executable repository now materializes the 36-person viable-candidate
 cohort, the Europresse-first news corpus backbone, dbt-owned exposure/summary
-marts, and Python-owned regression/bootstrap diagnostics. The transformer-based
-NLP enrichment stack remains the main planned extension.
+marts, Python-owned regression/bootstrap diagnostics, and the Phase 0 NLP input
+contract builder. The transformer-based NLP scoring stack remains the main
+planned extension.
 
 Active news-analysis window for the implemented corpus slice:
 `2025-11-01` to `2026-04-30`.
@@ -26,7 +27,7 @@ The implemented layers are:
 | Layer | Status | Current contract |
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
-| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, and quarantine outputs |
+| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, and quarantine outputs |
 | Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
@@ -338,6 +339,12 @@ Current implemented quarantine outputs include:
   still be retained as article metadata, but they only contribute to exposure
   after strict candidate evidence creates a `silver.fact_mention` row.
 
+| Column | Type | Notes |
+|---|---|---|
+| `canonical_article_id` | VARCHAR | Primary key for the canonical article denominator |
+| `language` | VARCHAR | Article language used by downstream NLP input gating |
+| `has_full_text` | BOOLEAN | Whether the canonical record has usable body text for matching and future NLP |
+
 ### `silver.fact_mention`
 
 - Grain: one row per canonical article × sampled candidate match
@@ -346,6 +353,49 @@ Current implemented quarantine outputs include:
 - Matching contract: full-text articles use title + body + URL evidence.
   Metadata-only articles use title + URL evidence only; the original PDF path or
   candidate-specific PDF filename is never treated as match evidence.
+
+### `silver.fact_mention_nlp_input`
+
+- Grain: one row per `mention_id`
+- Source: `silver.fact_mention.context_sentences`
+- Owner: Python module `src/nlp/input_contracts.py`
+- Status: Phase 0 implemented as a contract builder/materializer. It is not yet
+  wired into the default news-corpus CLI or downstream Transformer scoring.
+- Role: model-input boundary for later lexicon, sentiment, tone, and framing
+  enrichments.
+- Text minimization contract:
+  - `input_text` is derived only from mention-level `context_sentences`.
+  - `article_language` is joined from `silver.fact_article.language`.
+  - Full article body text is never read from this step and never re-persisted
+    by this table.
+  - Repeated whitespace is collapsed before hashing and word counting.
+- DQ contract:
+  - `mention_id`, `canonical_article_id`, and `leader_id` are required.
+  - `mention_id` must be unique.
+  - `input_hash` is populated for every non-empty normalized `input_text`.
+  - `skip_reason` is required when `eligible_for_inference = FALSE`.
+  - Empty contexts use `skip_reason = 'empty_context'`.
+  - Contexts below `NLP_MIN_LEXICON_WORD_COUNT` use
+    `skip_reason = 'too_short_for_lexicon'`.
+  - Contexts below `NLP_MIN_INFERENCE_WORD_COUNT` but long enough for lexicon
+    audit use `skip_reason = 'too_short_for_inference'`.
+  - Non-French or unknown article-language rows use
+    `skip_reason = 'language_not_french'`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `mention_id` | VARCHAR | Primary key inherited from `silver.fact_mention` |
+| `canonical_article_id` | VARCHAR | Foreign key to `silver.fact_article` |
+| `leader_id` | VARCHAR | Foreign key to `gold.sample_leaders` |
+| `article_language` | VARCHAR | Language from `silver.fact_article`; French regional subtags are collapsed to `fr`, while non-French language codes preserve region for source-mix audits |
+| `input_text` | VARCHAR | Mention context only; nullable for empty skipped rows |
+| `input_hash` | CHAR(32) | MD5 of normalized `input_text`; populated for every non-empty input |
+| `context_word_count` | INTEGER | Whitespace-delimited word count; not a model tokenizer/BPE count |
+| `eligible_for_lexicon` | BOOLEAN | `TRUE` when the context can feed deterministic lexicon audit |
+| `eligible_for_inference` | BOOLEAN | `TRUE` when the context can feed Transformer inference |
+| `skip_reason` | VARCHAR | Controlled reason for rows not eligible for inference |
+| `prepared_at` | TIMESTAMP | UTC timestamp for the contract build |
+| `input_contract_version` | VARCHAR | Default `mention_context_v2`; version bumps require full regeneration |
 
 ### `silver.manual_review_candidate_match`
 
@@ -657,4 +707,4 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
-| NLP fact tables and marts | Partially implemented | `fact_mention`/framing scaffolding exists; add transformer enrichments next |
+| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input` builder exists; add lexicon/model outputs and Gold activation next |
