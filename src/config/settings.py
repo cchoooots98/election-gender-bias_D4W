@@ -86,10 +86,21 @@ NER_MODEL_NAME: str = os.getenv("NER_MODEL_NAME", "Jean-Baptiste/camembert-ner")
 SENTIMENT_MODEL_NAME: str = os.getenv(
     "SENTIMENT_MODEL_NAME", "cmarkea/distilcamembert-base-sentiment"
 )
-NLI_MODEL_NAME: str = os.getenv("NLI_MODEL_NAME", "BaptisteDoyen/camembert-base-xnli")
+NLI_MODEL_NAME: str = os.getenv("NLI_MODEL_NAME", "cmarkea/distilcamembert-base-nli")
+NLI_BACKUP_MODEL_NAME: str = os.getenv(
+    "NLI_BACKUP_MODEL_NAME", "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+)
 EMBEDDING_MODEL_NAME: str = os.getenv(
     "EMBEDDING_MODEL_NAME", "dangvantuan/sentence-camembert-base"
 )
+
+# Revision defaults stay explicit so the model bundle hash changes whenever a
+# future production run pins exact HuggingFace commit hashes.
+NER_MODEL_REVISION: str = os.getenv("NER_MODEL_REVISION", "main")
+SENTIMENT_MODEL_REVISION: str = os.getenv("SENTIMENT_MODEL_REVISION", "main")
+NLI_MODEL_REVISION: str = os.getenv("NLI_MODEL_REVISION", "main")
+NLI_BACKUP_MODEL_REVISION: str = os.getenv("NLI_BACKUP_MODEL_REVISION", "main")
+EMBEDDING_MODEL_REVISION: str = os.getenv("EMBEDDING_MODEL_REVISION", "main")
 
 # ── NLP inference ─────────────────────────────────────────────────────────────
 # Batch size: trade-off between GPU memory usage and throughput.
@@ -99,6 +110,26 @@ NLP_BATCH_SIZE: int = int(os.getenv("NLP_BATCH_SIZE", "32"))
 # CamemBERT's maximum context window is 512 tokens; truncation beyond this
 # is handled by the tokenizer, but flagged in logs by the NLP modules.
 NLP_MAX_TOKEN_LENGTH: int = int(os.getenv("NLP_MAX_TOKEN_LENGTH", "512"))
+
+NLP_TONE_THRESHOLD: float = float(os.getenv("NLP_TONE_THRESHOLD", "0.60"))
+NLP_FRAME_THRESHOLD: float = float(os.getenv("NLP_FRAME_THRESHOLD", "0.60"))
+NLP_HYPOTHESIS_TEMPLATE_VERSION: str = os.getenv(
+    "NLP_HYPOTHESIS_TEMPLATE_VERSION", "candidate_tone_frame_v1"
+)
+NLP_MODEL_DEVICE: str = os.getenv("NLP_MODEL_DEVICE", "auto")
+
+# Phase 0 NLP input contract. Keep this version stable unless the text
+# preparation rules change in a way that would alter hashes or eligibility.
+NLP_INPUT_CONTRACT_VERSION: str = os.getenv(
+    "NLP_INPUT_CONTRACT_VERSION", "mention_context_v2"
+)
+
+# Phase 0 counts whitespace-delimited words, not model tokenizer or BPE tokens.
+# Lexicon audit can use shorter snippets; Transformer inference needs more
+# sentence context to avoid noisy tone/framing classifications.
+NLP_MIN_LEXICON_WORD_COUNT: int = int(os.getenv("NLP_MIN_LEXICON_WORD_COUNT", "3"))
+NLP_MIN_INFERENCE_WORD_COUNT: int = int(os.getenv("NLP_MIN_INFERENCE_WORD_COUNT", "12"))
+NLP_MAX_INPUT_TEXT_CHARS: int = int(os.getenv("NLP_MAX_INPUT_TEXT_CHARS", "5000"))
 
 # ── Data quality (DQ) thresholds ─────────────────────────────────────────────
 # DQ = Data Quality. These thresholds determine when a pipeline step fails
