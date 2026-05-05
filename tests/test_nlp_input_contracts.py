@@ -7,6 +7,7 @@ import logging
 import pandas as pd
 import pytest
 
+import src.nlp.input_contracts as input_contracts
 from src.nlp.input_contracts import (
     FACT_MENTION_NLP_INPUT_COLUMNS,
     build_fact_mention_nlp_input,
@@ -14,6 +15,7 @@ from src.nlp.input_contracts import (
     materialize_fact_mention_nlp_input,
     validate_fact_mention_nlp_input,
 )
+from src.nlp.normalization import is_missing_scalar, is_null_or_blank
 from src.transform._exceptions import DataQualityError
 
 
@@ -278,6 +280,14 @@ def test_compute_input_hash_is_invariant_to_repeated_whitespace():
 def test_compute_input_hash_returns_none_for_empty_inputs(value):
     """Boundary: empty or null-like text has no hashable semantic payload."""
     assert compute_input_hash(value) is None
+
+
+def test_input_contracts_reuses_shared_null_helpers():
+    """Regression: Phase 0 and Phase 1 must share null/blank semantics."""
+    assert input_contracts.is_missing_scalar is is_missing_scalar
+    assert input_contracts.is_null_or_blank is is_null_or_blank
+    assert not hasattr(input_contracts, "_is_missing")
+    assert not hasattr(input_contracts, "_is_null_or_blank")
 
 
 def test_build_fact_mention_nlp_input_hash_is_invariant_to_repeated_whitespace():

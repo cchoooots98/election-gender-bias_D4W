@@ -24,6 +24,7 @@ from src.config.settings import (
 )
 from src.ingest.news.corpus_storage import write_duckdb_table, write_parquet_table
 from src.ingest.news.normalize import stable_md5
+from src.nlp.normalization import is_missing_scalar, is_null_or_blank
 from src.transform._exceptions import DataQualityError
 
 logger = logging.getLogger(__name__)
@@ -403,7 +404,7 @@ def _validate_required_identifier_values(
 ) -> None:
     """Raise when core identifiers contain null or blank values."""
     for column_name in identifier_columns:
-        invalid_identifier_mask = dataframe[column_name].map(_is_null_or_blank)
+        invalid_identifier_mask = dataframe[column_name].map(is_null_or_blank)
         if invalid_identifier_mask.any():
             invalid_count = int(invalid_identifier_mask.sum())
             raise DataQualityError(
@@ -466,7 +467,7 @@ def _validate_boolean_column(
 
 def _validate_language_values(nlp_input_dataframe: pd.DataFrame) -> None:
     """Validate that article language is present for auditability."""
-    missing_language = nlp_input_dataframe["article_language"].map(_is_null_or_blank)
+    missing_language = nlp_input_dataframe["article_language"].map(is_null_or_blank)
     if missing_language.any():
         raise DataQualityError("fact_mention_nlp_input article_language has blanks")
 
@@ -597,7 +598,7 @@ def _build_skip_reason_series(
 
 def _normalize_context_text(value: object) -> str:
     """Collapse repeated whitespace while preserving scoring-relevant text."""
-    if _is_missing(value):
+    if is_missing_scalar(value):
         return ""
     return _REPEATED_WHITESPACE_PATTERN.sub(" ", str(value)).strip()
 
@@ -611,7 +612,7 @@ def _count_context_words(input_text: str) -> int:
 
 def _normalize_language_code(value: object) -> str:
     """Normalize nullable article language values for the language gate."""
-    if _is_null_or_blank(value):
+    if is_null_or_blank(value):
         return "unknown"
     normalized_language = str(value).strip().lower().replace("_", "-")
     primary_subtag = normalized_language.split("-", 1)[0]
@@ -622,7 +623,7 @@ def _normalize_language_code(value: object) -> str:
 
 def _coerce_required_identifier(value: object, column_name: str) -> str:
     """Return a stripped string identifier after null/blank validation."""
-    if _is_null_or_blank(value):
+    if is_null_or_blank(value):
         raise DataQualityError(f"{column_name} is required")
     return str(value).strip()
 
@@ -635,18 +636,3 @@ def _coerce_utc_timestamp(value: pd.Timestamp | str | None) -> pd.Timestamp:
     if timestamp.tzinfo is None:
         return timestamp.tz_localize("UTC")
     return timestamp.tz_convert("UTC")
-
-
-def _is_missing(value: object) -> bool:
-    """Return whether a scalar value should be treated as missing."""
-    try:
-        return bool(pd.isna(value))
-    except (TypeError, ValueError):
-        return False
-
-
-def _is_null_or_blank(value: object) -> bool:
-    """Return whether a required text identifier is null or blank."""
-    if _is_missing(value):
-        return True
-    return str(value).strip() == ""
