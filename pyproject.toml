@@ -13,9 +13,13 @@ readme = "README.md"
 run-sampling-pipeline = "src.cli.run_sampling_pipeline:main"
 run-news-corpus-pipeline = "src.cli.run_news_corpus_pipeline:main"
 run-nlp-input-pipeline = "src.cli.run_nlp_input_pipeline:main"
+run-nlp-lexicon-pipeline = "src.cli.run_nlp_lexicon_pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]
+
+[tool.setuptools.package-data]
+"src.nlp.lexicons" = ["*.json"]
 
 [tool.black]
 line-length = 88
