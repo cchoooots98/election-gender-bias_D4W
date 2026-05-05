@@ -1,0 +1,88 @@
+{
+  "lexicon_version": "stereotype_terms_v1",
+  "description": "Minimal seed lexicon for deterministic French media framing and stereotype audit counts.",
+  "controlled_category_alignment": "Category names intentionally match the v1 controlled frame labels used by future fact_mention_frame_score outputs, excluding unclassified.",
+  "categories": [
+    {
+      "category": "politique",
+      "terms": [
+        "budget",
+        "conseil municipal",
+        "ecole",
+        "gouvernance",
+        "logement",
+        "mandat",
+        "programme",
+        "projet",
+        "service public",
+        "transport"
+      ]
+    },
+    {
+      "category": "vie_privee",
+      "terms": [
+        "conjoint",
+        "conjointe",
+        "couple",
+        "enfants",
+        "epouse",
+        "famille",
+        "mari",
+        "parents",
+        "vie privee"
+      ]
+    },
+    {
+      "category": "apparence",
+      "terms": [
+        "age",
+        "apparence",
+        "cheveux",
+        "elegance",
+        "physique",
+        "robe",
+        "sourire",
+        "style vestimentaire",
+        "tenue"
+      ]
+    },
+    {
+      "category": "scandale",
+      "terms": [
+        "accusation",
+        "controverse",
+        "corruption",
+        "enquete",
+        "mis en cause",
+        "plainte",
+        "polemique",
+        "scandale"
+      ]
+    },
+    {
+      "category": "personnalite",
+      "terms": [
+        "ambition",
+        "ambitieuse",
+        "ambitieux",
+        "autoritaire",
+        "charisme",
+        "competence",
+        "courage",
+        "leadership",
+        "temperament"
+      ]
+    },
+    {
+      "category": "securite",
+      "terms": [
+        "delinquance",
+        "incivilites",
+        "ordre public",
+        "police",
+        "securite",
+        "violence"
+      ]
+    }
+  ]
+}
