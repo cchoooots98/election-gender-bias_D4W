@@ -52,18 +52,18 @@ flowchart LR
             F1["fact_article_source"]
             F2["fact_article"]
             F3["fact_mention"]
-            F4["fact_stereotype<br>word_counts"]
+            F4["fact_mention<br>nlp_input"]
+            F5["fact_stereotype<br>word_counts"]
         end
     end
 
     subgraph NLP["NLP Pipeline"]
-        N1["1 Dedup<br>Sentence-CamemBERT"]
-        N2["2 NER<br>CamemBERT-NER"]
-        N3["3 Context<br>Extraction"]
-        N4["4 Sentiment<br>DistilCamemBERT"]
-        N5["5 Frames<br>CamemBERT-NLI x 6"]
-        N6["6 Stereotype<br>Lexicon counts"]
-        N1 --> N2 --> N3 --> N4 & N5 & N6
+        N0["Phase 0<br>Mention context input"]
+        N1["Phase 1<br>Stereotype lexicon counts"]
+        N2["Planned<br>Sentiment baseline"]
+        N3["Planned<br>NLI tone and frames"]
+        N0 --> N1
+        N0 -.-> N2 & N3
     end
 
     subgraph GLD["Gold"]
@@ -88,11 +88,13 @@ flowchart LR
     G1 --> B3
     B3 --> F1
     F1 --> F2
+    G1 & F2 --> F3
 
-    F2 --> NLP
-    NLP --> F3 & F4
+    F3 --> N0 --> F4
+    F4 --> N1 --> F5
 
     G1 & F3 --> G2 & G3 & G4 & G5 & G6
+    F5 -. "future NLP Gold activation" .-> G3 & G4
     G5 --> G7 & G8
     G2 & G3 & G4 & G6 & G7 & G8 --> DASH["Streamlit Dashboard"]
 ```
@@ -102,7 +104,9 @@ stops after materializing `gold.candidate_universe` and `gold.sample_leaders`.
 `src/orchestration/news_corpus_pipeline.py` then runs the Europresse manifest
 through `news_source_record`, `fact_article_source`, `fact_article`,
 `fact_mention`, dbt-owned exposure/summary marts, and Python-owned regression
-diagnostics. The transformer NLP blocks shown above remain planned extensions.
+diagnostics. Phase 0 NLP input preparation and Phase 1 deterministic lexicon
+counts are implemented as separate CLI steps. Transformer sentiment, tone, and
+framing blocks remain planned extensions.
 
 ---
 
@@ -190,12 +194,27 @@ erDiagram
         float   stereo_competence
     }
 
+    FACT_MENTION_NLP_INPUT {
+        char    mention_id PK
+        char    canonical_article_id FK
+        char    leader_id FK
+        varchar article_language
+        varchar input_text
+        char    input_hash
+        integer context_word_count
+        boolean eligible_for_lexicon
+        boolean eligible_for_inference
+        varchar skip_reason
+        varchar input_contract_version
+    }
+
     FACT_STEREOTYPE_WORD_COUNTS {
         char    mention_id FK
-        varchar word
-        varchar category
+        varchar lexicon_category
+        varchar term
         integer count
-        float   per_1k_words
+        float   count_per_1k_tokens
+        varchar lexicon_version
     }
 
     DIM_COMMUNE ||--o{ DIM_CANDIDATE_LEADER : "commune_insee"
@@ -205,7 +224,8 @@ erDiagram
     DIM_CANDIDATE_LEADER ||--o{ FACT_MENTION : "leader_id"
     FACT_ARTICLE ||--o{ FACT_MENTION : "article_id"
     FACT_ARTICLE ||--o| FACT_ARTICLE : "canonical_article_id"
-    FACT_MENTION ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
+    FACT_MENTION ||--o| FACT_MENTION_NLP_INPUT : "mention_id"
+    FACT_MENTION_NLP_INPUT ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
 ```
 
 `is_incumbent` is a nullable boolean contract: `TRUE`/`FALSE` when a commune-level

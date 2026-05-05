@@ -222,6 +222,34 @@ signals, not final bias metrics.
 
 ---
 
+## NLP Lexicon Audit Metrics (`silver.fact_stereotype_word_counts`)
+
+Grain: **one row per article x candidate mention x lexicon category x term**.
+These are deterministic audit features, not model-inferred tone or framing
+labels.
+
+### `count`
+
+| Field | Value |
+|---|---|
+| **Definition** | Number of exact normalized token or phrase matches for one lexicon term in one mention context |
+| **Formula** | Sliding-window exact match over `tokenize_lexicon_text(input_text)` |
+| **Owner** | `src/nlp/lexicon.py` |
+| **Null contract** | Never NULL for emitted rows. Zero-count rows are omitted. |
+| **Interpretation** | Reproducible vocabulary signal for auditing media framing and stereotype-associated wording. |
+
+### `count_per_1k_tokens`
+
+| Field | Value |
+|---|---|
+| **Definition** | Lexicon count normalized by the number of normalized lexicon tokens in the mention context |
+| **Formula** | `count / normalized_token_count * 1000` |
+| **Owner** | `src/nlp/lexicon.py` |
+| **Null contract** | Never NULL for emitted rows. |
+| **Interpretation** | Makes counts comparable across short and long context windows. This is a deterministic whitespace-token metric, not a CamemBERT tokenizer/BPE count. |
+
+---
+
 ## Metric Freshness and SLA
 
 | Layer | Rebuilt when | SLA |
@@ -229,6 +257,7 @@ signals, not final bias metrics.
 | Bronze (official data) | `make run-sampling-pipeline` is run | No SLA — static government data; re-ingest only when ministry publishes updates |
 | Silver (article corpus) | `make run-news-corpus-pipeline` is run | No SLA — corpus is bounded by the fixed analysis window (Nov 2025 – Apr 2026) |
 | Silver (NLP input) | `make run-nlp-input-pipeline` is run | Must pass Phase 0 contract tests before downstream NLP scoring |
+| Silver (NLP lexicon audit) | `make run-nlp-lexicon-pipeline` is run | Must pass Phase 1 contract tests before downstream NLP Gold activation |
 | Gold dbt marts | Embedded in `make run-news-corpus-pipeline` via `dbt run` | Must pass all 37 schema tests before the pipeline exits |
 | Gold regression | Embedded in news corpus pipeline | Recomputed on each run; `status` column records whether fit succeeded |
 | Dashboard | On Streamlit startup — reads Gold Parquet files | Reflects the last complete pipeline run |

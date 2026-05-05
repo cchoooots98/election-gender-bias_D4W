@@ -27,7 +27,7 @@ The implemented layers are:
 | Layer | Status | Current contract |
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
-| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, and quarantine outputs |
+| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, and quarantine outputs |
 | Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
@@ -397,6 +397,36 @@ Current implemented quarantine outputs include:
 | `prepared_at` | TIMESTAMP | UTC timestamp for the contract build |
 | `input_contract_version` | VARCHAR | Default `mention_context_v2`; version bumps require full regeneration |
 
+### `silver.fact_stereotype_word_counts`
+
+- Grain: one row per `mention_id` x `lexicon_category` x `term`
+- Source: `silver.fact_mention_nlp_input.input_text`
+- Owner: Python module `src/nlp/lexicon.py`
+- Status: Phase 1 implemented as a deterministic lexicon audit. It does not
+  run Transformer inference and does not activate Gold NLP marts yet.
+- Role: deterministic vocabulary audit table for stereotype and framing terms.
+- Text minimization contract:
+  - Counts are derived only from Phase 0 mention-level `input_text`.
+  - Full article body text is never read by this step.
+  - Output rows persist normalized terms and counts, not source text snippets.
+- DQ contract:
+  - Only rows with `eligible_for_lexicon = TRUE` are counted.
+  - Zero-count rows are omitted; downstream marts should treat missing rows as
+    zero when NLP Gold metrics are activated.
+  - `mention_id`, `lexicon_category`, `term`, and `lexicon_version` are required.
+  - Unique key is `mention_id`, `lexicon_category`, `term`.
+  - `count` must be positive and `count_per_1k_tokens` must be non-negative.
+  - `lexicon_version` defaults to `stereotype_terms_v1`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `mention_id` | VARCHAR | Foreign key to `silver.fact_mention_nlp_input` |
+| `lexicon_category` | VARCHAR | Controlled category such as `politique`, `vie_privee`, `apparence`, `scandale`, `personnalite`, or `securite` |
+| `term` | VARCHAR | Normalized lexicon term that matched the mention context |
+| `count` | INTEGER | Positive match count within the normalized mention context |
+| `count_per_1k_tokens` | DOUBLE | `count / normalized_token_count * 1000` |
+| `lexicon_version` | VARCHAR | Versioned lexicon identifier persisted on every row |
+
 ### `silver.manual_review_candidate_match`
 
 - Grain: one row per ambiguous candidate/article pair withheld from auto-match
@@ -707,4 +737,4 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
-| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input` builder exists; add lexicon/model outputs and Gold activation next |
+| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input` and Phase 1 `fact_stereotype_word_counts` exist; add model outputs and Gold activation next |

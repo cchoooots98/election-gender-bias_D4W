@@ -168,12 +168,16 @@ standard errors due to overdispersion. The dashboard therefore compares Poisson,
 Negative Binomial, and bootstrap confidence intervals. Under the more cautious
 diagnostics, the direction is positive but uncertain rather than confirmed.
 
-### Framing and tone
+### Framing, tone, and lexicon audit
 
-Framing and sentiment classification require transformer-based NLP inference
-(CamemBERT-NLI) and are not yet implemented in the runnable repository slice.
-All 3,392 mentions are currently unclassified. This layer is the primary
-planned extension; see the roadmap in **Status** below.
+The deterministic stereotype lexicon audit is implemented as Phase 1 of the
+NLP enrichment layer. It counts versioned French vocabulary categories from
+mention-level context windows only, without persisting full article text.
+
+Framing and sentiment classification still require transformer-based NLP
+inference (CamemBERT-NLI) and are not yet implemented in the runnable
+repository slice. Mentions remain unclassified for tone and framing until the
+model-scoring tables are added.
 
 ---
 
@@ -184,7 +188,7 @@ planned extension; see the roadmap in **Status** below.
 | **Single source** | All news data comes from Europresse, a subscription-based press aggregator. It covers major French dailies and regionals but excludes pure-digital outlets, social media, and broadcast transcripts. Coverage is not representative of the full French media ecosystem. |
 | **Matched cohort, not national sample** | The 36-candidate cohort is a stratified matched sample designed for controlled gender comparison, not for national-level inference. Findings describe this cohort; they cannot be extrapolated to all French municipal candidates. |
 | **Small n** | With n = 36, regression estimates are sensitive to individual high-leverage candidates (notably one large-city incumbent with 1,277 articles). Standard errors may be underestimated under Poisson equidispersion assumptions. |
-| **Framing not yet implemented** | The NLP pipeline (NER, sentiment, NLI frame classification) is a planned extension. No framing or tone conclusions can be drawn from the current corpus. |
+| **Framing not yet implemented** | Deterministic lexicon counts are implemented, but the NLP pipeline's NER, sentiment, and NLI frame classification stages remain planned. No framing or tone conclusions can be drawn from the current corpus. |
 | **Observational design** | No causal claims are warranted. Associations between gender and coverage volume may reflect unmeasured confounders not captured by the available covariates. |
 
 ---
@@ -194,8 +198,9 @@ planned extension; see the roadmap in **Status** below.
 > **Runnable end to end for the implemented slice.** The repository now
 > implements official-data ingest, the 36-candidate viable-cohort sampler, the
 > Europresse-first news corpus ETL, dbt-owned exposure/summary marts, a Python
-> regression/bootstrap audit layer, and the Streamlit dashboard. The transformer-based NLP
-> enrichment stack remains the main planned extension.
+> regression/bootstrap audit layer, Phase 0 NLP input preparation, Phase 1
+> deterministic lexicon counts, and the Streamlit dashboard. Transformer-based
+> NLP scoring remains the main planned extension.
 
 ---
 
@@ -248,7 +253,7 @@ the standard pattern in modern data engineering (Databricks, dbt, Snowflake).
 | Layer | Purpose | Key Tables |
 |---|---|---|
 | **Bronze** | Faithful raw copies, append-only | `news_source_record`, `candidates_tour1/2`, `results_tour1/2`, `cog_communes`, `seats_population`, `rne_incumbents` |
-| **Silver** | Cleaned, validated, analysis-ready | `dim_commune`, `dim_candidate_leader`, `fact_election_result`, `fact_article_source`, `fact_article`, `fact_mention`, `fact_stereotype_word_counts` |
+| **Silver** | Cleaned, validated, analysis-ready | `dim_commune`, `dim_candidate_leader`, `fact_election_result`, `fact_article_source`, `fact_article`, `fact_mention`, `fact_mention_nlp_input`, `fact_stereotype_word_counts` |
 | **Gold** | Consumer marts + cohort snapshot for dashboard | `candidate_universe`, `sample_leaders`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
 | **Meta** | Pipeline observability | `meta_run`, `meta_source_snapshot` |
 
@@ -329,9 +334,10 @@ flowchart LR
 
 **Implementation note.** The runnable repository currently materializes
 `gold.candidate_universe`, `gold.sample_leaders`, the canonical news corpus backbone
-(`fact_article_source`, `fact_article`, `fact_mention`), dbt-owned exposure
-and summary marts, and Python-owned regression diagnostics. The transformer NLP
-blocks shown above remain planned extensions on top of that implemented slice.
+(`fact_article_source`, `fact_article`, `fact_mention`), Phase 0 NLP input,
+Phase 1 deterministic stereotype counts, dbt-owned exposure and summary marts,
+and Python-owned regression diagnostics. The transformer NLP blocks shown above
+remain planned extensions on top of that implemented slice.
 
 ### Silver Layer - Entity Relationships
 

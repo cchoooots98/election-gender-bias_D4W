@@ -20,7 +20,7 @@ Audience: anyone with repository access who needs to reproduce or debug a run.
 
 ## 1. Pipeline Inventory
 
-The repository implements four operational entry points. The first three are
+The repository implements five operational entry points. The first four are
 sequentially dependent; dbt build is also embedded in the news corpus pipeline.
 
 | Pipeline | Entry point | Produces | Typical runtime |
@@ -28,11 +28,13 @@ sequentially dependent; dbt build is also embedded in the news corpus pipeline.
 | **Sampling pipeline** | `make run-sampling-pipeline` | Bronze official data → Silver dims/facts → `gold.candidate_universe` → `gold.sample_leaders` + `sample_manifest.json` | ~2 min (download + DuckDB writes) |
 | **News corpus pipeline** | `make run-news-corpus-pipeline` | `news_source_record` bronze → Silver article/mention tables → dbt Gold marts → Python regression diagnostics → `news_corpus_qa_report.json` | ~5–30 min depending on corpus size and web-scrape flag |
 | **NLP input pipeline** | `make run-nlp-input-pipeline` | Materializes `silver.fact_mention_nlp_input` from existing `fact_mention` and `fact_article` Silver outputs | <30 sec |
+| **NLP lexicon pipeline** | `make run-nlp-lexicon-pipeline` | Materializes `silver.fact_stereotype_word_counts` from Phase 0 NLP input rows and the packaged versioned lexicon | <30 sec |
 | **dbt build** (embedded in news corpus) | `make dbt-build` | Refreshes all five Gold dbt mart tables and runs 37 schema tests | ~30 sec |
 
 **Dependency contract**: the news corpus pipeline reads `gold.sample_leaders` as its candidate scope.
 The NLP input pipeline reads the Silver article and mention tables produced by the news corpus pipeline.
-Always run sampling, then news corpus, then NLP input.
+The NLP lexicon pipeline reads the Phase 0 NLP input table.
+Always run sampling, then news corpus, then NLP input, then NLP lexicon.
 
 ---
 
@@ -101,6 +103,9 @@ python -m src.cli.run_news_corpus_pipeline --enable-web-scrape
 
 # Step 3 (optional): build the Phase 0 NLP input contract
 make run-nlp-input-pipeline
+
+# Step 4 (optional): build the Phase 1 deterministic lexicon audit
+make run-nlp-lexicon-pipeline
 ```
 
 ### Verification after each step
@@ -147,6 +152,27 @@ conn.close()
 "
 ```
 
+After the NLP lexicon pipeline:
+```bash
+python -c "
+import duckdb
+conn = duckdb.connect('warehouse/municipal.duckdb')
+summary = conn.execute(\"\"\"
+    SELECT
+        COUNT(*) AS rows,
+        COUNT(DISTINCT mention_id) AS mentions_with_terms,
+        COUNT(DISTINCT lexicon_category) AS categories_with_terms,
+        SUM(count) AS total_term_count
+    FROM silver.fact_stereotype_word_counts
+\"\"\").fetchone()
+print(
+    f'stereotype rows: {summary[0]}, mentions: {summary[1]}, '
+    f'categories: {summary[2]}, total terms: {summary[3]}'
+)
+conn.close()
+"
+```
+
 After dbt build:
 ```bash
 make dbt-build
@@ -154,9 +180,9 @@ make dbt-build
 ```
 
 NLP dbt tests are planned when `fact_mention_nlp_summary`,
-`fact_mention_frame_score`, and stereotype count tables become active Silver
-sources. Phase 0 is covered by Python contract tests because it does not yet
-feed a dbt mart.
+`fact_mention_frame_score`, and stereotype count tables feed Gold marts.
+Phase 0 and Phase 1 are covered by Python contract tests because they do not
+yet feed dbt marts.
 
 ---
 
@@ -476,4 +502,4 @@ rejection counts with `accepted_record_count` in `meta.meta_news_import_batch`.
 | **No incremental news ingest** | The news corpus pipeline rebuilds all Silver/Gold tables from the full Europresse manifest on each run. Adding new exports re-processes the full history. |
 | **Web-scrape cache is local-only** | `data/bronze/news_web_fetch/` is git-ignored. A fresh clone has no cache; add `--enable-web-scrape` to rebuild it, which requires network access to news sites. |
 | **PLM cities excluded** | Paris, Lyon, Marseille arrondissement candidates are excluded from the analytical cohort. This is documented as a known scope limitation in README. |
-| **Transformer NLP scoring not implemented** | Phase 0 materializes `silver.fact_mention_nlp_input`, but sentiment, tone, framing, and stereotype output tables are still planned. `mart_framing_metrics` contains only `unclassified` rows until those Silver outputs and dbt tests are added. |
+| **Transformer NLP scoring not implemented** | Phase 0 materializes `silver.fact_mention_nlp_input` and Phase 1 materializes deterministic stereotype lexicon counts, but sentiment, tone, and framing model outputs are still planned. `mart_framing_metrics` contains only `unclassified` rows until model Silver outputs and dbt tests are added. |
