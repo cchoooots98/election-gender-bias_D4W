@@ -97,7 +97,7 @@ respective open licences. Sources include:
 The analysis is organised around three layers:
 
 1. **Exposure** - article counts, headline mentions, and number of distinct media sources per candidate, normalised by commune population.
-2. **Tone and framing** - sentiment signals and topical frame distribution (for example policy/governance vs. appearance/private life) for sentences associated with each candidate.
+2. **Tone and framing** - a generic sentiment baseline is implemented for mention contexts; target-aware tone and topical frame distribution remain planned.
 3. **Bias indicators** - gender-level comparisons of framing distributions and stereotype-associated vocabulary frequency, with regression models controlling for city size, political bloc, incumbent status, and region.
 
 ---
@@ -168,16 +168,24 @@ standard errors due to overdispersion. The dashboard therefore compares Poisson,
 Negative Binomial, and bootstrap confidence intervals. Under the more cautious
 diagnostics, the direction is positive but uncertain rather than confirmed.
 
-### Framing, tone, and lexicon audit
+### Sentiment, framing, tone, and lexicon audit
 
 The deterministic stereotype lexicon audit is implemented as Phase 1 of the
 NLP enrichment layer. It counts versioned French vocabulary categories from
 mention-level context windows only, without persisting full article text.
+The v1 lexicon is a minimal seed for structural validation and requires
+expansion before statistical interpretation.
 
-Framing and sentiment classification still require transformer-based NLP
-inference (CamemBERT-NLI) and are not yet implemented in the runnable
-repository slice. Mentions remain unclassified for tone and framing until the
-model-scoring tables are added.
+The Phase 2 generic sentiment baseline is implemented in
+`silver.fact_mention_nlp_summary` using the optional
+`cmarkea/distilcamembert-base-sentiment` model. The model card documents
+French 1-5 star labels and Amazon Reviews / Allocine training data:
+https://huggingface.co/cmarkea/distilcamembert-base-sentiment. This output is
+a review-domain baseline diagnostic, not candidate-aware political tone.
+
+Target-aware tone and framing still require NLI-based model outputs. Mentions
+remain unclassified for tone and framing until those Silver model-scoring
+tables are added and Gold marts are activated.
 
 ---
 
@@ -188,7 +196,8 @@ model-scoring tables are added.
 | **Single source** | All news data comes from Europresse, a subscription-based press aggregator. It covers major French dailies and regionals but excludes pure-digital outlets, social media, and broadcast transcripts. Coverage is not representative of the full French media ecosystem. |
 | **Matched cohort, not national sample** | The 36-candidate cohort is a stratified matched sample designed for controlled gender comparison, not for national-level inference. Findings describe this cohort; they cannot be extrapolated to all French municipal candidates. |
 | **Small n** | With n = 36, regression estimates are sensitive to individual high-leverage candidates (notably one large-city incumbent with 1,277 articles). Standard errors may be underestimated under Poisson equidispersion assumptions. |
-| **Framing not yet implemented** | Deterministic lexicon counts are implemented, but the NLP pipeline's NER, sentiment, and NLI frame classification stages remain planned. No framing or tone conclusions can be drawn from the current corpus. |
+| **Target-aware tone and framing not yet implemented** | Deterministic lexicon counts and a generic sentiment baseline are implemented, but the NLP pipeline's NER, NLI tone, and NLI frame classification stages remain planned. No framing or candidate-aware tone conclusions can be drawn from the current corpus. |
+| **Seed lexicon is intentionally sparse** | The Phase 1 lexicon validates deterministic counting contracts. It must be expanded and reviewed before lexicon rates are used as statistical media-bias evidence. |
 | **Observational design** | No causal claims are warranted. Associations between gender and coverage volume may reflect unmeasured confounders not captured by the available covariates. |
 
 ---
@@ -199,8 +208,9 @@ model-scoring tables are added.
 > implements official-data ingest, the 36-candidate viable-cohort sampler, the
 > Europresse-first news corpus ETL, dbt-owned exposure/summary marts, a Python
 > regression/bootstrap audit layer, Phase 0 NLP input preparation, Phase 1
-> deterministic lexicon counts, and the Streamlit dashboard. Transformer-based
-> NLP scoring remains the main planned extension.
+> deterministic lexicon counts, Phase 2 generic sentiment baseline, and the
+> Streamlit dashboard. Target-aware tone, framing, and Gold NLP activation
+> remain planned extensions.
 
 ---
 
@@ -241,7 +251,8 @@ Both entrypoints are pinned to the project-local `.venv`, not the system PATH.
 The default environment intentionally matches the implemented repository
 surface. dbt-duckdb is part of the runnable stack because SQL-friendly Gold
 marts are now committed under `dbt/`. Transformer NLP dependencies remain
-future-only in [`requirements-future.in`](requirements-future.in).
+optional in [`requirements-future.in`](requirements-future.in) for the sentiment
+baseline and later NLI scoring.
 
 ---
 
@@ -253,13 +264,14 @@ the standard pattern in modern data engineering (Databricks, dbt, Snowflake).
 | Layer | Purpose | Key Tables |
 |---|---|---|
 | **Bronze** | Faithful raw copies, append-only | `news_source_record`, `candidates_tour1/2`, `results_tour1/2`, `cog_communes`, `seats_population`, `rne_incumbents` |
-| **Silver** | Cleaned, validated, analysis-ready | `dim_commune`, `dim_candidate_leader`, `fact_election_result`, `fact_article_source`, `fact_article`, `fact_mention`, `fact_mention_nlp_input`, `fact_stereotype_word_counts` |
+| **Silver** | Cleaned, validated, analysis-ready | `dim_commune`, `dim_candidate_leader`, `fact_election_result`, `fact_article_source`, `fact_article`, `fact_mention`, `fact_mention_nlp_input`, `fact_stereotype_word_counts`, `fact_mention_nlp_summary` |
 | **Gold** | Consumer marts + cohort snapshot for dashboard | `candidate_universe`, `sample_leaders`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
 | **Meta** | Pipeline observability | `meta_run`, `meta_source_snapshot` |
 
 The central fact table is **`fact_mention`** (grain: one article x one
 candidate). All NLP outputs - sentiment scores, frame classifications,
-stereotype word counts - are anchored to this grain.
+stereotype word counts - are anchored to this grain through the
+`fact_mention_nlp_input` contract.
 
 Full logical data model: [`docs/data-model.md`](docs/data-model.md)
 
@@ -288,18 +300,20 @@ flowchart LR
             F1["fact_article_source"]
             F2["fact_article"]
             F3["fact_mention"]
-            F4["fact_stereotype<br>word_counts"]
+            F4["fact_mention<br>nlp_input"]
+            F5["fact_stereotype<br>word_counts"]
+            F6["fact_mention<br>nlp_summary"]
         end
     end
 
     subgraph NLP["NLP Pipeline"]
-        N1["1 Dedup<br>Sentence-CamemBERT"]
-        N2["2 NER<br>CamemBERT-NER"]
-        N3["3 Context<br>Extraction"]
-        N4["4 Sentiment<br>DistilCamemBERT"]
-        N5["5 Frames<br>CamemBERT-NLI x 6"]
-        N6["6 Stereotype<br>Lexicon counts"]
-        N1 --> N2 --> N3 --> N4 & N5 & N6
+        N0["Phase 0<br>Mention context input"]
+        N1["Phase 1<br>Stereotype lexicon counts"]
+        N2["Phase 2<br>Sentiment baseline"]
+        N3["Planned<br>NLI tone and frames"]
+        N0 --> N1
+        N0 --> N2
+        N0 -.-> N3
     end
 
     subgraph GLD["Gold"]
@@ -324,10 +338,13 @@ flowchart LR
     B3 --> F1
     F1 --> F2
 
-    F2 --> NLP
-    NLP --> F3 & F4
+    G1 & F2 --> F3
+    F3 --> N0 --> F4
+    F4 --> N1 --> F5
+    F4 --> N2 --> F6
 
     G1 & F3 --> G2 & G3 & G4 & G5 & G6
+    F5 & F6 -. "future NLP Gold activation" .-> G3 & G4
     G5 --> G7 & G8
     G2 & G3 & G4 & G6 & G7 & G8 --> DASH["Streamlit Dashboard"]
 ```
@@ -335,9 +352,10 @@ flowchart LR
 **Implementation note.** The runnable repository currently materializes
 `gold.candidate_universe`, `gold.sample_leaders`, the canonical news corpus backbone
 (`fact_article_source`, `fact_article`, `fact_mention`), Phase 0 NLP input,
-Phase 1 deterministic stereotype counts, dbt-owned exposure and summary marts,
-and Python-owned regression diagnostics. The transformer NLP blocks shown above
-remain planned extensions on top of that implemented slice.
+Phase 1 deterministic stereotype counts, Phase 2 generic sentiment baseline,
+dbt-owned exposure and summary marts, and Python-owned regression diagnostics.
+Target-aware tone, framing, and Gold NLP activation remain planned extensions
+on top of that implemented slice.
 
 ### Silver Layer - Entity Relationships
 
@@ -370,28 +388,44 @@ erDiagram
     }
 
     FACT_MENTION {
-        char  mention_id PK
-        char  article_id FK
-        char  leader_id FK
-        float sentiment_score
-        float prob_negative
-        float frame_politique
-        float frame_apparence
-        float stereo_famille
-        float stereo_competence
+        char    mention_id PK
+        char    canonical_article_id FK
+        char    leader_id FK
+        varchar context_sentences
+        boolean headline_mention_flag
+    }
+
+    FACT_MENTION_NLP_INPUT {
+        char    mention_id PK
+        char    canonical_article_id FK
+        char    leader_id FK
+        varchar input_text
+        char    input_hash
+        boolean eligible_for_inference
+    }
+
+    FACT_MENTION_NLP_SUMMARY {
+        char    mention_id PK
+        varchar generic_sentiment_label
+        float   generic_sentiment_score
+        varchar target_tone_label
+        varchar primary_frame_label
+        varchar nlp_enrichment_status
     }
 
     FACT_STEREOTYPE_WORD_COUNTS {
         char    mention_id FK
-        varchar word
-        varchar category
-        float   per_1k_words
+        varchar lexicon_category
+        varchar term
+        float   count_per_1k_tokens
     }
 
     DIM_COMMUNE ||--o{ DIM_CANDIDATE_LEADER : "commune_insee"
     DIM_CANDIDATE_LEADER ||--o{ FACT_MENTION : "leader_id"
     FACT_ARTICLE ||--o{ FACT_MENTION : "article_id"
-    FACT_MENTION ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
+    FACT_MENTION ||--o| FACT_MENTION_NLP_INPUT : "mention_id"
+    FACT_MENTION_NLP_INPUT ||--o| FACT_MENTION_NLP_SUMMARY : "mention_id"
+    FACT_MENTION_NLP_INPUT ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
 ```
 
 ---
