@@ -22,9 +22,9 @@ from src.config.settings import (
     SILVER_DIR,
     WAREHOUSE_PATH,
 )
-from src.ingest.news.corpus_storage import write_duckdb_table, write_parquet_table
 from src.ingest.news.normalize import stable_md5
 from src.nlp.normalization import is_missing_scalar, is_null_or_blank
+from src.storage.tables import write_duckdb_table, write_parquet_table
 from src.transform._exceptions import DataQualityError
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ CONTROLLED_SKIP_REASONS: frozenset[str] = frozenset(
     }
 )
 
-FACT_MENTION_NLP_INPUT_COLUMNS: list[str] = [
+FACT_MENTION_NLP_INPUT_COLUMNS: tuple[str, ...] = (
     "mention_id",
     "canonical_article_id",
     "leader_id",
@@ -59,7 +59,7 @@ FACT_MENTION_NLP_INPUT_COLUMNS: list[str] = [
     "skip_reason",
     "prepared_at",
     "input_contract_version",
-]
+)
 
 _FACT_MENTION_SOURCE_COLUMNS = (
     "mention_id",

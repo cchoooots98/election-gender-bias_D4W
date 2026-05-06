@@ -18,12 +18,12 @@ from typing import Any
 import pandas as pd
 
 from src.config.settings import SILVER_DIR, WAREHOUSE_PATH
-from src.ingest.news.corpus_storage import write_duckdb_table, write_parquet_table
 from src.nlp.normalization import (
     is_null_or_blank,
     normalize_lexicon_text,
     tokenize_lexicon_text,
 )
+from src.storage.tables import write_duckdb_table, write_parquet_table
 from src.transform._exceptions import DataQualityError
 
 logger = logging.getLogger(__name__)

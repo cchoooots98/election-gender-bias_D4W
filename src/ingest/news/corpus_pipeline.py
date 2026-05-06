@@ -40,11 +40,6 @@ from src.ingest.news.corpus import (
     load_news_import_manifest,
     parse_import_batch,
 )
-from src.ingest.news.corpus_storage import (
-    write_duckdb_table,
-    write_json_report,
-    write_parquet_table,
-)
 from src.ingest.news.matching import build_fact_mentions
 from src.ingest.news.models import NewsCorpusRunResult
 from src.ingest.news.normalize import stable_md5 as _stable_md5
@@ -57,6 +52,11 @@ from src.metrics.news.quality import run_news_corpus_quality_checks
 from src.metrics.news.regression import (
     build_mart_bootstrap_ci,
     build_mart_regression_results,
+)
+from src.storage.tables import (
+    write_duckdb_table,
+    write_json_report,
+    write_parquet_table,
 )
 
 logger = logging.getLogger(__name__)
