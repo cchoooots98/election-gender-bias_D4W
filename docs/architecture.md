@@ -13,8 +13,9 @@ Two architectural horizons coexist in this project:
 - **Implemented downstream slices (separate entry points)**: sampled cohort ->
   Europresse-first news corpus backbone -> DuckDB -> dbt Gold marts -> Python
   regression/bootstrap diagnostics -> Streamlit dashboard
-- **Planned full pipeline**: implemented slice -> transformer NLP enrichment ->
-  richer analytical marts
+- **NLP enrichment slices**: Phase 0 input, Phase 1 lexicon audit, and Phase 2
+  generic sentiment baseline are implemented; target-aware tone, framing, and
+  richer analytical marts remain planned
 
 This distinction matters for portfolio honesty: the runnable script currently
 delivers the implemented audit slice, not the entire future roadmap.
@@ -54,16 +55,18 @@ flowchart LR
             F3["fact_mention"]
             F4["fact_mention<br>nlp_input"]
             F5["fact_stereotype<br>word_counts"]
+            F6["fact_mention<br>nlp_summary"]
         end
     end
 
     subgraph NLP["NLP Pipeline"]
         N0["Phase 0<br>Mention context input"]
         N1["Phase 1<br>Stereotype lexicon counts"]
-        N2["Planned<br>Sentiment baseline"]
+        N2["Phase 2<br>Sentiment baseline"]
         N3["Planned<br>NLI tone and frames"]
         N0 --> N1
-        N0 -.-> N2 & N3
+        N0 --> N2
+        N0 -.-> N3
     end
 
     subgraph GLD["Gold"]
@@ -92,9 +95,10 @@ flowchart LR
 
     F3 --> N0 --> F4
     F4 --> N1 --> F5
+    F4 --> N2 --> F6
 
     G1 & F3 --> G2 & G3 & G4 & G5 & G6
-    F5 -. "future NLP Gold activation" .-> G3 & G4
+    F5 & F6 -. "future NLP Gold activation" .-> G3 & G4
     G5 --> G7 & G8
     G2 & G3 & G4 & G6 & G7 & G8 --> DASH["Streamlit Dashboard"]
 ```
@@ -104,9 +108,9 @@ stops after materializing `gold.candidate_universe` and `gold.sample_leaders`.
 `src/orchestration/news_corpus_pipeline.py` then runs the Europresse manifest
 through `news_source_record`, `fact_article_source`, `fact_article`,
 `fact_mention`, dbt-owned exposure/summary marts, and Python-owned regression
-diagnostics. Phase 0 NLP input preparation and Phase 1 deterministic lexicon
-counts are implemented as separate CLI steps. Transformer sentiment, tone, and
-framing blocks remain planned extensions.
+diagnostics. Phase 0 NLP input preparation, Phase 1 deterministic lexicon
+counts, and Phase 2 generic sentiment baseline are implemented as separate CLI
+steps. Target-aware tone and framing blocks remain planned extensions.
 
 ---
 
@@ -217,6 +221,19 @@ erDiagram
         varchar lexicon_version
     }
 
+    FACT_MENTION_NLP_SUMMARY {
+        char    mention_id PK
+        char    leader_id FK
+        char    canonical_article_id FK
+        char    input_hash
+        varchar generic_sentiment_label
+        float   generic_sentiment_score
+        varchar target_tone_label
+        varchar primary_frame_label
+        varchar nlp_enrichment_status
+        varchar nlp_model_bundle_version
+    }
+
     DIM_COMMUNE ||--o{ DIM_CANDIDATE_LEADER : "commune_insee"
     DIM_CANDIDATE_LEADER ||--o{ CANDIDATE_UNIVERSE : "leader_id"
     DIM_COMMUNE ||--o{ CANDIDATE_UNIVERSE : "commune_insee"
@@ -226,6 +243,7 @@ erDiagram
     FACT_ARTICLE ||--o| FACT_ARTICLE : "canonical_article_id"
     FACT_MENTION ||--o| FACT_MENTION_NLP_INPUT : "mention_id"
     FACT_MENTION_NLP_INPUT ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
+    FACT_MENTION_NLP_INPUT ||--o| FACT_MENTION_NLP_SUMMARY : "mention_id"
 ```
 
 `is_incumbent` is a nullable boolean contract: `TRUE`/`FALSE` when a commune-level
@@ -244,7 +262,7 @@ sampling slices.
 | File format | Parquet (Snappy compressed) | Delta Lake / ORC |
 | Orchestration | Scripted runner now; Airflow planned | Prefect, Dagster, Airflow |
 | SQL mart layer | dbt-duckdb | dbt-snowflake, dbt-bigquery |
-| Future French NLP | CamemBERT family (planned) | BERT (English equivalent) |
+| French NLP | DistilCamemBERT sentiment baseline implemented; CamemBERT NLI planned | BERT-style Transformer enrichment |
 | Text extraction | pdfminer.six + BeautifulSoup + trafilatura fallback | Parser stack for archive exports |
 | Dashboard | Streamlit | Tableau, Looker |
 | CI/CD | GitHub Actions | Jenkins, CircleCI |

@@ -2,7 +2,7 @@
 
 > Model type: logical table contracts for the current medallion architecture.
 > Physical storage lives in Parquet plus `warehouse/municipal.duckdb`.
-> Last updated: 2026-04-11
+> Last updated: 2026-05-05
 
 ---
 
@@ -16,8 +16,9 @@ slice** of the broader research design:
 The executable repository now materializes the 36-person viable-candidate
 cohort, the Europresse-first news corpus backbone, dbt-owned exposure/summary
 marts, Python-owned regression/bootstrap diagnostics, and the Phase 0 NLP input
-contract builder. The transformer-based NLP scoring stack remains the main
-planned extension.
+contract builder. The Phase 2 generic sentiment baseline is implemented as a
+separate Silver output table. Target-aware tone, framing, and Gold NLP
+activation remain planned extensions.
 
 Active news-analysis window for the implemented corpus slice:
 `2025-11-01` to `2026-04-30`.
@@ -27,7 +28,7 @@ The implemented layers are:
 | Layer | Status | Current contract |
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
-| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, and quarantine outputs |
+| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2 `fact_mention_nlp_summary`, and quarantine outputs |
 | Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
@@ -359,8 +360,9 @@ Current implemented quarantine outputs include:
 - Grain: one row per `mention_id`
 - Source: `silver.fact_mention.context_sentences`
 - Owner: Python module `src/nlp/input_contracts.py`
-- Status: Phase 0 implemented as a contract builder/materializer. It is not yet
-  wired into the default news-corpus CLI or downstream Transformer scoring.
+- Status: Phase 0 implemented as a contract builder/materializer. It is not
+  wired into the default news-corpus CLI, but it is consumed by the Phase 1
+  lexicon audit and Phase 2 generic sentiment baseline.
 - Role: model-input boundary for later lexicon, sentiment, tone, and framing
   enrichments.
 - Text minimization contract:
@@ -396,6 +398,52 @@ Current implemented quarantine outputs include:
 | `skip_reason` | VARCHAR | Controlled reason for rows not eligible for inference |
 | `prepared_at` | TIMESTAMP | UTC timestamp for the contract build |
 | `input_contract_version` | VARCHAR | Default `mention_context_v2`; version bumps require full regeneration |
+
+### `silver.fact_mention_nlp_summary`
+
+- Grain: one row per `mention_id`
+- Source: `silver.fact_mention_nlp_input`
+- Owner: Python module `src/nlp/sentiment.py`
+- Status: Phase 2 implemented as a generic sentiment baseline. Target-aware
+  tone and framing fields are reserved as placeholders until later phases.
+- Role: compact mention-level NLP output table for model results that do not
+  need one row per frame label.
+- Model contract:
+  - Sentiment uses `cmarkea/distilcamembert-base-sentiment` as a French
+    1-5 star baseline. The model card documents Amazon Reviews and Allocine
+    training data and 1-5 star labels:
+    https://huggingface.co/cmarkea/distilcamembert-base-sentiment
+  - `generic_sentiment_score = (expected_star - 3) / 2`, where
+    `expected_star = sum(star * probability)` across stars 1 through 5.
+  - The score is a generic review-domain sentiment diagnostic, not
+    candidate-aware political tone and not a gender-bias conclusion.
+- DQ contract:
+  - `mention_id` must be unique and must match the current NLP input table.
+  - Scored rows require `input_hash`, `generic_sentiment_label`,
+    `generic_sentiment_score`, `scored_at`, and `nlp_model_bundle_version`.
+  - Failed rows require `error_type`.
+  - `generic_sentiment_score` must be between `-1` and `1`.
+  - `target_tone_label` and `primary_frame_label` remain `unclassified` in
+    Phase 2; `target_tone_probability` and `primary_frame_probability` remain
+    NULL until Phase 3/4 Natural Language Inference outputs are implemented.
+
+| Column | Type | Notes |
+|---|---|---|
+| `mention_id` | VARCHAR | Primary key and foreign key to `silver.fact_mention_nlp_input` |
+| `leader_id` | VARCHAR | Denormalized sampled leader identifier |
+| `canonical_article_id` | VARCHAR | Denormalized article identifier for audits |
+| `input_hash` | CHAR(32) | Must match the NLP input hash for scored rows |
+| `generic_sentiment_label` | VARCHAR | Top 1-5 star label from the baseline sentiment model |
+| `generic_sentiment_score` | DOUBLE | Expected-star score mapped to `[-1, 1]` |
+| `target_tone_label` | VARCHAR | `unclassified` until target-aware tone is implemented |
+| `target_tone_probability` | DOUBLE | NULL until a later target-aware tone phase |
+| `primary_frame_label` | VARCHAR | `unclassified` until framing is implemented |
+| `primary_frame_probability` | DOUBLE | NULL until a later framing phase |
+| `was_truncated_to_max_length` | BOOLEAN | Whether tokenizer input exceeded `NLP_MAX_TOKEN_LENGTH` |
+| `nlp_enrichment_status` | VARCHAR | `scored`, `skipped`, or `failed` |
+| `nlp_model_bundle_version` | VARCHAR | Deterministic model-bundle hash from `src/nlp/model_bundle.py` |
+| `scored_at` | TIMESTAMP | UTC scoring timestamp for scored or failed rows |
+| `error_type` | VARCHAR | Required when `nlp_enrichment_status = 'failed'` |
 
 ### `silver.fact_stereotype_word_counts`
 
@@ -737,4 +785,4 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
-| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input` and Phase 1 `fact_stereotype_word_counts` exist; add model outputs and Gold activation next |
+| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, and Phase 2 `fact_mention_nlp_summary` exist; add target-aware tone, framing, and Gold activation next |

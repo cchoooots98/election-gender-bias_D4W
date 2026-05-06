@@ -3,7 +3,7 @@
 Canonical definitions for all analytical metrics published in the Gold layer.
 Consumers: Streamlit dashboard, regression audit, portfolio documentation.
 
-Last updated: 2026-04-13
+Last updated: 2026-05-05
 
 ---
 
@@ -228,6 +228,10 @@ Grain: **one row per article x candidate mention x lexicon category x term**.
 These are deterministic audit features, not model-inferred tone or framing
 labels.
 
+The v1 lexicon is a minimal seed for structural validation. It must be expanded
+and reviewed before `count` or `count_per_1k_tokens` are used for statistical
+claims about media bias.
+
 ### `count`
 
 | Field | Value |
@@ -246,7 +250,57 @@ labels.
 | **Formula** | `count / normalized_token_count * 1000` |
 | **Owner** | `src/nlp/lexicon.py` |
 | **Null contract** | Never NULL for emitted rows. |
-| **Interpretation** | Makes counts comparable across short and long context windows. This is a deterministic whitespace-token metric, not a CamemBERT tokenizer/BPE count. |
+| **Interpretation** | Makes counts comparable across short and long context windows. This is a deterministic whitespace-token metric, not a CamemBERT tokenizer/BPE count. Because the v1 lexicon is intentionally sparse, zero counts should be read as "no seed-term match", not as absence of stereotype or framing language. |
+
+---
+
+## NLP Sentiment Baseline Metrics (`silver.fact_mention_nlp_summary`)
+
+Grain: **one row per article x candidate mention**. These are Phase 2 generic
+sentiment diagnostics, not candidate-aware tone or framing metrics.
+
+Model methodology source: `cmarkea/distilcamembert-base-sentiment`, documented
+as a French 1-5 star sentiment model trained on Amazon Reviews and Allocine:
+https://huggingface.co/cmarkea/distilcamembert-base-sentiment
+
+### `generic_sentiment_label`
+
+| Field | Value |
+|---|---|
+| **Definition** | Highest-probability 1-5 star label from the generic sentiment baseline |
+| **Accepted values** | `1 star`, `2 stars`, `3 stars`, `4 stars`, `5 stars` |
+| **Owner** | `src/nlp/sentiment.py` |
+| **Null contract** | NULL when `nlp_enrichment_status` is `skipped` or `failed`. |
+| **Interpretation** | Review-domain sentiment signal for QA and baseline comparison only. It is not target-aware political tone. |
+
+### `generic_sentiment_score`
+
+| Field | Value |
+|---|---|
+| **Definition** | Expected 1-5 star model score mapped to `[-1, 1]` |
+| **Formula** | `(expected_star - 3) / 2`, where `expected_star = sum(star * probability)` across stars 1 through 5 |
+| **Owner** | `src/nlp/sentiment.py` |
+| **Null contract** | NULL when `nlp_enrichment_status` is `skipped` or `failed`. |
+| **Interpretation** | Generic negative-to-positive baseline. Do not use it as the primary bias conclusion because the model is not conditioned on the candidate target. |
+
+### `nlp_enrichment_status`
+
+| Field | Value |
+|---|---|
+| **Definition** | Row-level Phase 2 scoring status |
+| **Accepted values** | `scored`, `skipped`, `failed` |
+| **Owner** | `src/nlp/sentiment.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Coverage denominator for model QA. `skipped` means the Phase 0 input was not eligible for inference; `failed` means model scoring was requested but failed for the row. |
+
+### `nlp_model_bundle_version`
+
+| Field | Value |
+|---|---|
+| **Definition** | Deterministic short hash of model names, immutable Hugging Face commit revisions, thresholds, runtime dimensions, and hypothesis template version |
+| **Owner** | `src/nlp/model_bundle.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Model provenance identifier. A changed bundle version means sentiment outputs were produced under different runtime metadata and should not be mixed without audit. Mutable revisions such as `main`, `master`, or `latest` are rejected by the model-bundle contract. |
 
 ---
 
@@ -258,6 +312,7 @@ labels.
 | Silver (article corpus) | `make run-news-corpus-pipeline` is run | No SLA — corpus is bounded by the fixed analysis window (Nov 2025 – Apr 2026) |
 | Silver (NLP input) | `make run-nlp-input-pipeline` is run | Must pass Phase 0 contract tests before downstream NLP scoring |
 | Silver (NLP lexicon audit) | `make run-nlp-lexicon-pipeline` is run | Must pass Phase 1 contract tests before downstream NLP Gold activation |
+| Silver (NLP sentiment baseline) | `make run-nlp-sentiment-pipeline` is run | Requires optional Transformer dependencies and must pass Phase 2 contract tests |
 | Gold dbt marts | Embedded in `make run-news-corpus-pipeline` via `dbt run` | Must pass all 37 schema tests before the pipeline exits |
 | Gold regression | Embedded in news corpus pipeline | Recomputed on each run; `status` column records whether fit succeeded |
 | Dashboard | On Streamlit startup — reads Gold Parquet files | Reflects the last complete pipeline run |
