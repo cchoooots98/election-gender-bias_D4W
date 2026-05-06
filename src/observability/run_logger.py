@@ -310,6 +310,69 @@ def log_pipeline_run(
     return run_id
 
 
+def log_pipeline_run_safely(
+    *,
+    run_id: str,
+    flow_name: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    status: str,
+    rows_ingested: int,
+    error_count: int,
+    artifact_paths: list[str | Path],
+    duckdb_path: Path = WAREHOUSE_PATH,
+    original_error: Exception | None = None,
+    pipeline_logger: logging.Logger | None = None,
+) -> str | None:
+    """Record a pipeline run without masking an existing root-cause error.
+
+    Args:
+        run_id: Unique identifier for this pipeline run.
+        flow_name: Logical pipeline name.
+        start_ts: UTC timestamp when the run started.
+        end_ts: UTC timestamp when the run finished.
+        status: Final run state.
+        rows_ingested: Total rows materialized by this runnable slice.
+        error_count: Count of non-successful steps in this run.
+        artifact_paths: Ordered list of output artifact paths.
+        duckdb_path: Path to the DuckDB warehouse file.
+        original_error: Exception already raised by the required pipeline step,
+            if any. When present, meta logging failures are logged but do not
+            replace this root-cause exception.
+        pipeline_logger: Optional caller logger used for contextual error logs.
+
+    Returns:
+        The run ID when meta logging succeeds, otherwise ``None`` when a meta
+        logging failure is suppressed to preserve ``original_error``.
+
+    Raises:
+        Exception: Re-raises the meta logging exception when the pipeline body
+            succeeded and there is no original error to preserve.
+    """
+    effective_logger = pipeline_logger or logger
+    try:
+        return log_pipeline_run(
+            run_id=run_id,
+            flow_name=flow_name,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            status=status,
+            rows_ingested=rows_ingested,
+            error_count=error_count,
+            artifact_paths=artifact_paths,
+            duckdb_path=duckdb_path,
+        )
+    except Exception:
+        if original_error is None:
+            effective_logger.exception("Failed to write meta_run for run_id=%s", run_id)
+            raise
+        effective_logger.exception(
+            "Failed to write meta_run for run_id=%s; original error preserved",
+            run_id,
+        )
+        return None
+
+
 def log_news_import_batch(
     *,
     batch_id: str,

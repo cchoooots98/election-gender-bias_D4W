@@ -17,7 +17,7 @@ import pandas as pd
 
 from src.config.settings import SILVER_DIR, WAREHOUSE_PATH
 from src.nlp.input_contracts import materialize_fact_mention_nlp_input
-from src.observability.run_logger import log_pipeline_run
+from src.observability.run_logger import log_pipeline_run_safely
 
 logger = logging.getLogger(__name__)
 
@@ -86,26 +86,20 @@ def run_nlp_input_pipeline(
         logger.exception("NLP input pipeline failed run_id=%s", run_id)
         raise
     finally:
-        try:
-            # TODO: add flow_version when meta.meta_run supports contract versions.
-            log_pipeline_run(
-                run_id=run_id,
-                flow_name=_FLOW_NAME,
-                start_ts=start_ts,
-                end_ts=datetime.now(UTC),
-                status=status,
-                rows_ingested=rows_ingested,
-                error_count=error_count,
-                artifact_paths=artifact_paths,
-                duckdb_path=duckdb_path,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to write meta_run for run_id=%s; original error preserved",
-                run_id,
-            )
-            if original_error is None:
-                raise
+        # TODO: add flow_version when meta.meta_run supports contract versions.
+        log_pipeline_run_safely(
+            run_id=run_id,
+            flow_name=_FLOW_NAME,
+            start_ts=start_ts,
+            end_ts=datetime.now(UTC),
+            status=status,
+            rows_ingested=rows_ingested,
+            error_count=error_count,
+            artifact_paths=artifact_paths,
+            duckdb_path=duckdb_path,
+            original_error=original_error,
+            pipeline_logger=logger,
+        )
 
     return NlpInputPipelineResult(
         run_id=run_id,
