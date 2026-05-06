@@ -17,10 +17,118 @@ reproducible, and don't rely on external state.
 import pandas as pd
 import pytest
 
+from src.nlp.model_bundle import ModelBundleConfig
+from src.nlp.sentiment import SentimentPrediction
+
 try:
     import duckdb
 except ImportError:  # pragma: no cover - depends on local test environment
     duckdb = None
+
+
+class ConfigurableSentimentRunner:
+    """Mock scorer returning configured predictions in input order."""
+
+    def __init__(
+        self,
+        predictions_by_text: dict[str, SentimentPrediction],
+    ) -> None:
+        self.predictions_by_text = predictions_by_text
+        self.calls: list[list[str]] = []
+
+    def predict_batch(self, texts):
+        """Return configured predictions for the requested texts."""
+        self.calls.append(list(texts))
+        return [self.predictions_by_text[text] for text in texts]
+
+
+@pytest.fixture
+def model_bundle_config_factory():
+    """Return a factory for valid model-bundle test configurations."""
+
+    def _build_model_bundle_config(**overrides) -> ModelBundleConfig:
+        values = {
+            "sentiment_model_name": "cmarkea/distilcamembert-base-sentiment",
+            "sentiment_model_revision": "a" * 40,
+            "nli_model_name": "cmarkea/distilcamembert-base-nli",
+            "nli_model_revision": "b" * 40,
+            "nli_backup_model_name": "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
+            "nli_backup_model_revision": "c" * 40,
+            "hypothesis_template_version": "candidate_tone_frame_v1",
+            "tone_threshold": 0.6,
+            "frame_threshold": 0.6,
+            "max_token_length": 512,
+            "batch_size": 32,
+            "device": "cpu",
+        }
+        values.update(overrides)
+        return ModelBundleConfig(**values)
+
+    return _build_model_bundle_config
+
+
+@pytest.fixture
+def sentiment_prediction_factory():
+    """Return a factory for valid mock sentiment predictions."""
+
+    def _build_sentiment_prediction(
+        *,
+        label: str = "5 stars",
+        was_truncated: bool = False,
+        probabilities: dict[str, float] | None = None,
+    ) -> SentimentPrediction:
+        return SentimentPrediction(
+            label=label,
+            probabilities_by_label=probabilities
+            or {
+                "1 star": 0.10,
+                "2 stars": 0.10,
+                "3 stars": 0.20,
+                "4 stars": 0.30,
+                "5 stars": 0.30,
+            },
+            was_truncated_to_max_length=was_truncated,
+        )
+
+    return _build_sentiment_prediction
+
+
+@pytest.fixture
+def sentiment_runner_factory():
+    """Return a factory for configurable mock sentiment runners."""
+
+    def _build_runner(
+        predictions_by_text: dict[str, SentimentPrediction],
+    ) -> ConfigurableSentimentRunner:
+        return ConfigurableSentimentRunner(predictions_by_text)
+
+    return _build_runner
+
+
+@pytest.fixture
+def read_pipeline_meta_run():
+    """Return a helper for reading the latest meta_run row for one pipeline."""
+
+    def _read_pipeline_meta_run(duckdb_path, flow_name: str):
+        if duckdb is None:
+            pytest.skip("duckdb is not installed in this test environment")
+
+        conn = duckdb.connect(str(duckdb_path))
+        try:
+            return conn.execute(
+                """
+                SELECT status, rows_ingested, error_count
+                FROM meta.meta_run
+                WHERE flow_name = ?
+                ORDER BY end_ts DESC
+                LIMIT 1
+                """,
+                [flow_name],
+            ).fetchone()
+        finally:
+            conn.close()
+
+    return _read_pipeline_meta_run
 
 
 @pytest.fixture
