@@ -672,10 +672,12 @@ def _render_panel5_future_nlp() -> None:
     """Panel 5: future NLP contract."""
     st.subheader("What remains out of scope?")
     _callout(
-        "Framing and tone are planned next-phase NLP outputs. The current "
-        "mart_framing_metrics table is a stable contract with an unclassified "
-        "baseline only. Full text is used transiently during local processing; "
-        "persisted public artifacts are redacted and hash-based."
+        "Generic sentiment is now materialized as a Silver baseline output, "
+        "but framing and target-aware tone remain planned next-phase NLP "
+        "outputs. The current mart_framing_metrics table is a stable contract "
+        "with an unclassified baseline only. Full text is used transiently "
+        "during local processing; persisted public artifacts are redacted and "
+        "hash-based."
     )
     st.markdown(
         """
@@ -683,7 +685,7 @@ def _render_panel5_future_nlp() -> None:
 
         - NER (Named Entity Recognition) to anchor candidate mentions.
         - NLI (Natural Language Inference) to classify frames.
-        - Sentiment scoring for tone, with model versions pinned for reproducibility.
+        - Target-aware tone scoring, with model versions pinned for reproducibility.
         - A separate outcome model only after a formal `mart_electoral_outcome_model`
           exists in the data model.
         """
