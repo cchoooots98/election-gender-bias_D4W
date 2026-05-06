@@ -78,10 +78,17 @@ SCRAPE_RETRY_BACKOFF_SECONDS: float = float(
     os.getenv("SCRAPE_RETRY_BACKOFF_SECONDS", "5")
 )
 
+# Default to full PDF inspection because large Europresse exports can put only
+# cover and summary pages near the front of the file. Override only for local
+# debugging after verifying the route classification on the target batch.
+NEWS_PDF_INSPECTION_MAX_PAGES: int = int(
+    os.getenv("NEWS_PDF_INSPECTION_MAX_PAGES", "0")
+)
+
 # ── NLP models ────────────────────────────────────────────────────────────────
-# Model names are pinned for reproducibility: the same model name may resolve
-# to different weights if the HuggingFace Hub maintainer pushes an update.
-# Pin to a specific revision (commit hash) in production for full guarantees.
+# Model revisions default to immutable Hugging Face commit hashes so model
+# bundle hashes bind to actual weights, not a moving branch pointer such as
+# "main".
 NER_MODEL_NAME: str = os.getenv("NER_MODEL_NAME", "Jean-Baptiste/camembert-ner")
 SENTIMENT_MODEL_NAME: str = os.getenv(
     "SENTIMENT_MODEL_NAME", "cmarkea/distilcamembert-base-sentiment"
@@ -94,13 +101,26 @@ EMBEDDING_MODEL_NAME: str = os.getenv(
     "EMBEDDING_MODEL_NAME", "dangvantuan/sentence-camembert-base"
 )
 
-# Revision defaults stay explicit so the model bundle hash changes whenever a
-# future production run pins exact HuggingFace commit hashes.
-NER_MODEL_REVISION: str = os.getenv("NER_MODEL_REVISION", "main")
-SENTIMENT_MODEL_REVISION: str = os.getenv("SENTIMENT_MODEL_REVISION", "main")
-NLI_MODEL_REVISION: str = os.getenv("NLI_MODEL_REVISION", "main")
-NLI_BACKUP_MODEL_REVISION: str = os.getenv("NLI_BACKUP_MODEL_REVISION", "main")
-EMBEDDING_MODEL_REVISION: str = os.getenv("EMBEDDING_MODEL_REVISION", "main")
+NER_MODEL_REVISION: str = os.getenv(
+    "NER_MODEL_REVISION",
+    "ef35fe7767c1dad71f5c853838cdd80d0b3441ed",
+)
+SENTIMENT_MODEL_REVISION: str = os.getenv(
+    "SENTIMENT_MODEL_REVISION",
+    "5716940dead38a2685ae40c24a494e7a4e78b38b",
+)
+NLI_MODEL_REVISION: str = os.getenv(
+    "NLI_MODEL_REVISION",
+    "e1b36710a19092e452f6f6a226a9a82ccd185dcb",
+)
+NLI_BACKUP_MODEL_REVISION: str = os.getenv(
+    "NLI_BACKUP_MODEL_REVISION",
+    "8adb042d524ecd5c26d3e3ba0e3fbcf7e2d0864c",
+)
+EMBEDDING_MODEL_REVISION: str = os.getenv(
+    "EMBEDDING_MODEL_REVISION",
+    "103d895e85f97c1265c62efa238d092ecbb0d617",
+)
 
 # ── NLP inference ─────────────────────────────────────────────────────────────
 # Batch size: trade-off between GPU memory usage and throughput.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 from src.config.settings import (
@@ -26,6 +27,9 @@ from src.config.settings import (
     SENTIMENT_MODEL_REVISION,
 )
 
+_HUGGINGFACE_COMMIT_HASH_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_MUTABLE_REVISION_ALIASES = frozenset({"main", "master", "latest"})
+
 
 @dataclass(frozen=True)
 class ModelBundleConfig:
@@ -33,11 +37,11 @@ class ModelBundleConfig:
 
     Args:
         sentiment_model_name: HuggingFace model name for generic sentiment.
-        sentiment_model_revision: HuggingFace revision for sentiment weights.
+        sentiment_model_revision: Hugging Face commit hash for sentiment weights.
         nli_model_name: HuggingFace model name for tone and frame NLI scoring.
-        nli_model_revision: HuggingFace revision for primary NLI weights.
+        nli_model_revision: Hugging Face commit hash for primary NLI weights.
         nli_backup_model_name: Optional agreement-check model name.
-        nli_backup_model_revision: HuggingFace revision for the backup model.
+        nli_backup_model_revision: Hugging Face commit hash for the backup model.
         hypothesis_template_version: Version of the hypothesis text templates.
         tone_threshold: Confidence threshold for target-aware tone.
         frame_threshold: Confidence threshold for frame labels.
@@ -72,6 +76,18 @@ class ModelBundleConfig:
                 "hypothesis_template_version": self.hypothesis_template_version,
                 "device": self.device,
             }
+        )
+        _validate_huggingface_commit_revision(
+            "sentiment_model_revision",
+            self.sentiment_model_revision,
+        )
+        _validate_huggingface_commit_revision(
+            "nli_model_revision",
+            self.nli_model_revision,
+        )
+        _validate_huggingface_commit_revision(
+            "nli_backup_model_revision",
+            self.nli_backup_model_revision,
         )
         _validate_probability_threshold("tone_threshold", self.tone_threshold)
         _validate_probability_threshold("frame_threshold", self.frame_threshold)
@@ -190,6 +206,20 @@ def _require_non_blank(values_by_name: dict[str, str]) -> None:
     ]
     if blank_names:
         raise ValueError(f"Model bundle fields must be non-blank: {blank_names}")
+
+
+def _validate_huggingface_commit_revision(field_name: str, revision: str) -> None:
+    """Raise when model revision is not an immutable Hugging Face commit hash."""
+    normalized_revision = str(revision).strip()
+    if normalized_revision.lower() in _MUTABLE_REVISION_ALIASES:
+        raise ValueError(
+            f"{field_name} must pin a 40-character Hugging Face commit hash, "
+            f"not mutable alias {normalized_revision!r}"
+        )
+    if not _HUGGINGFACE_COMMIT_HASH_PATTERN.fullmatch(normalized_revision):
+        raise ValueError(
+            f"{field_name} must be a 40-character lowercase Hugging Face " "commit hash"
+        )
 
 
 def _validate_probability_threshold(name: str, value: float) -> None:
