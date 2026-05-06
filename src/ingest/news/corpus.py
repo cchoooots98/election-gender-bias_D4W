@@ -51,6 +51,7 @@ from src.config.settings import (
     ANALYSIS_START_DATE,
     DQ_MAX_NULL_RATE,
     DQ_MIN_ARTICLE_TEXT_LENGTH,
+    NEWS_PDF_INSPECTION_MAX_PAGES,
     SCRAPE_REQUEST_TIMEOUT_SECONDS,
 )
 from src.ingest.news.models import (
@@ -699,7 +700,7 @@ def _extract_first_url_from_text(text: str) -> str:
     return _extract_first_url_from_lines(str(text or "").splitlines())
 
 
-def _extract_pdf_text(file_path: Path) -> str:
+def _extract_pdf_text(file_path: Path, *, maxpages: int = 0) -> str:
     """Extract text from a PDF file with line-break structure preserved.
 
     pdfminer.six handles CIDFont/ToUnicode glyph mapping used by modern press
@@ -712,13 +713,14 @@ def _extract_pdf_text(file_path: Path) -> str:
 
     Args:
         file_path: Path to the PDF file.
+        maxpages: Maximum number of pages to extract. ``0`` means all pages.
 
     Returns:
         Extracted text with newlines preserved, or empty string on failure.
     """
     if _PDFMINER_AVAILABLE:
         try:
-            raw_text = _pdfminer_extract_text(str(file_path))
+            raw_text = _pdfminer_extract_text(str(file_path), maxpages=maxpages)
             if raw_text and raw_text.strip():
                 # Normalize form-feed page separators to newlines for uniform parsing.
                 return raw_text.replace("\x0c", "\n")
@@ -779,6 +781,9 @@ def _is_europresse_format(text: str) -> bool:
         True if the segmenter recovers at least one article with structured
         Europresse content.
     """
+    if _is_europresse_cover_or_summary(text):
+        return True
+
     articles = _segment_europresse_articles(text)
     if any(
         article.get("published_at")
@@ -791,6 +796,26 @@ def _is_europresse_format(text: str) -> bool:
         article.get("title") and article.get("declared_word_count")
         for article in articles
     )
+
+
+def _is_europresse_cover_or_summary(text: str) -> bool:
+    """Detect Europresse cover pages that precede article-level anchors.
+
+    Args:
+        text: Raw text extracted from the PDF inspection sample.
+
+    Returns:
+        True when the sample contains the Europresse export cover contract and
+        a declared document count.
+    """
+    declared_document_count = _extract_europresse_declared_document_count(text)
+    if declared_document_count is None:
+        return False
+
+    normalized_text = _clean_text(text).lower()
+    if "saved documents" not in normalized_text:
+        return False
+    return "cedrom-sni" in normalized_text or "exclusive use" in normalized_text
 
 
 def _extract_europresse_declared_document_count(full_text: str) -> int | None:
@@ -1290,7 +1315,8 @@ def inspect_import_batch(manifest: NewsImportManifest) -> ImportBatchInspection:
         "unsupported": 0,
     }
 
-    for file_path_str in manifest.file_paths:
+    total_files = len(manifest.file_paths)
+    for file_index, file_path_str in enumerate(manifest.file_paths, start=1):
         file_path = Path(file_path_str)
         if not file_path.exists():
             raise FileNotFoundError(f"News import file not found: {file_path}")
@@ -1309,9 +1335,19 @@ def inspect_import_batch(manifest: NewsImportManifest) -> ImportBatchInspection:
                 file_type=suffix.lstrip("."),
             )
         elif suffix in _PDF_EXTENSIONS:
-            # Extract text once here; reused by _is_europresse_format to avoid
-            # a second pdfminer pass during parse_import_batch.
-            pdf_text = _extract_pdf_text(file_path)
+            logger.info(
+                "Inspecting PDF import file index=%d total=%d path=%s size_mb=%.2f",
+                file_index,
+                total_files,
+                file_path,
+                file_path.stat().st_size / 1_000_000,
+            )
+            # Recall first: default inspection reads the full PDF because large
+            # Europresse exports may put only cover pages before article anchors.
+            pdf_text = _extract_pdf_text(
+                file_path,
+                maxpages=NEWS_PDF_INSPECTION_MAX_PAGES,
+            )
             has_text_layer = bool(pdf_text.strip())
             if has_text_layer and _is_europresse_format(pdf_text):
                 pdf_classification = "pdf_europresse_batch"
@@ -1493,6 +1529,7 @@ def parse_import_batch(
         if inspected_file.classification == "pdf_europresse_batch":
             # One Europresse PDF → N individual article bronze rows.
             # _extract_pdf_text preserves newlines for line-based segmentation.
+            logger.info("Extracting full Europresse PDF text path=%s", file_path)
             full_pdf_text = _extract_pdf_text(file_path)
             segmented_articles = _segment_europresse_articles(full_pdf_text)
             declared_document_count = _extract_europresse_declared_document_count(
@@ -1545,6 +1582,7 @@ def parse_import_batch(
         if inspected_file.classification == "pdf_text_layer":
             # Single-document PDF: treat the whole file as one article record.
             # _extract_pdf_text preserves newlines; _clean_text collapses to one line.
+            logger.info("Extracting full single-document PDF text path=%s", file_path)
             extracted_text = _clean_text(_extract_pdf_text(file_path))
             title = extracted_text.split(".")[0][:140].strip() or file_path.stem
             bronze_rows.append(

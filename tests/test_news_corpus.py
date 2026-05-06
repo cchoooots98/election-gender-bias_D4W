@@ -31,7 +31,6 @@ from src.ingest.news.corpus import (
     write_news_web_fetch_cache,
 )
 from src.ingest.news.corpus_pipeline import run_news_corpus_etl
-from src.ingest.news.corpus_storage import write_duckdb_table
 from src.ingest.news.matching import build_fact_mentions
 from src.ingest.news.models import (
     ImportBatchFile,
@@ -47,6 +46,7 @@ from src.metrics.news.regression import (
     build_mart_regression_results,
 )
 from src.orchestration import news_corpus_pipeline as orchestration_module
+from src.storage.tables import write_duckdb_table
 from src.transform._exceptions import DataQualityError
 
 _FIXTURE_DIR = Path(__file__).with_name("fixtures")
@@ -462,6 +462,65 @@ def test_inspect_import_batch_classifies_supported_files(tmp_path):
     assert classifications["article.html"] == "document_export"
     assert classifications["article.pdf"] == "pdf_text_layer"
     assert classifications["article.bin"] == "unsupported"
+
+
+def test_inspect_import_batch_uses_full_pdf_text_by_default(tmp_path, monkeypatch):
+    """Regression: import inspection must preserve recall for large batch PDFs."""
+    pdf_path = tmp_path / "large_export.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 placeholder")
+    manifest = NewsImportManifest(
+        batch_id="batch-001",
+        source_system="europresse",
+        window_start=date(2026, 2, 1),
+        window_end=date(2026, 4, 7),
+        exported_at=datetime(2026, 4, 7, 21, 0, tzinfo=UTC),
+        operator="tester",
+        access_level="restricted subscription export",
+        file_paths=(str(pdf_path),),
+        notes="manual export",
+    )
+    extraction_calls: list[dict[str, object]] = []
+
+    def _fake_extract_pdf_text(file_path, *, maxpages=0):
+        extraction_calls.append({"file_path": file_path, "maxpages": maxpages})
+        return "Bonjour la mairie"
+
+    monkeypatch.setattr(corpus_module, "NEWS_PDF_INSPECTION_MAX_PAGES", 0)
+    monkeypatch.setattr(corpus_module, "_extract_pdf_text", _fake_extract_pdf_text)
+
+    inspection = inspect_import_batch(manifest)
+
+    assert inspection.files[0].classification == "pdf_text_layer"
+    assert extraction_calls == [{"file_path": pdf_path, "maxpages": 0}]
+
+
+def test_inspect_import_batch_routes_europresse_cover_sample_to_batch_parser(
+    tmp_path,
+    monkeypatch,
+):
+    """Regression: cover-only samples from large exports still need batch parsing."""
+    pdf_path = tmp_path / "large_europresse_export.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 placeholder")
+    manifest = NewsImportManifest(
+        batch_id="batch-001",
+        source_system="europresse",
+        window_start=date(2026, 2, 1),
+        window_end=date(2026, 4, 7),
+        exported_at=datetime(2026, 4, 7, 21, 0, tzinfo=UTC),
+        operator="tester",
+        access_level="restricted subscription export",
+        file_paths=(str(pdf_path),),
+        notes="manual export",
+    )
+
+    def _fake_extract_pdf_text(file_path, *, maxpages=0):
+        return _EUROPRESSE_COVER_ONLY_SAMPLE
+
+    monkeypatch.setattr(corpus_module, "_extract_pdf_text", _fake_extract_pdf_text)
+
+    inspection = inspect_import_batch(manifest)
+
+    assert inspection.files[0].classification == "pdf_europresse_batch"
 
 
 def test_build_fact_article_source_normalizes_and_rejects_bad_rows():
@@ -1707,6 +1766,18 @@ _EUROPRESSE_ENGLISH_DATE_ARTICLE = (
     "enjeux locaux dans une interview complète publiée par la rédaction locale.\n"
     "This document is destined for the exclusive use of the subscriber.\n"
 )
+_EUROPRESSE_COVER_ONLY_SAMPLE = (
+    "Saved documents\n"
+    "Saturday, April 11, 2026 at 12:53 a.m.\n"
+    "178 documents\n"
+    "By Universite de Bordeaux\n"
+    "This document is destined for the exclusive use of the individual "
+    "designated by Universite de Bordeaux.\n"
+    "Service provided by CEDROM-SNi Inc.\n"
+    "Summary\n"
+    "Midi Libre\n"
+    "La Depeche du Midi\n"
+)
 _NON_EUROPRESSE_TEXT = "Some plain PDF text with no word-count bullets."
 
 
@@ -1718,6 +1789,11 @@ def test_is_europresse_format_returns_true_for_multi_article_pdf():
 def test_is_europresse_format_returns_true_for_single_dated_europresse_document():
     """Regression: one-document Europresse PDFs still use the structured parser."""
     assert _is_europresse_format(_EUROPRESSE_SINGLE_DOCUMENT) is True
+
+
+def test_is_europresse_format_returns_true_for_cover_only_sample():
+    """Regression: large Europresse PDF cover samples must route to batch parsing."""
+    assert _is_europresse_format(_EUROPRESSE_COVER_ONLY_SAMPLE) is True
 
 
 def test_is_europresse_format_returns_false_for_single_article():
