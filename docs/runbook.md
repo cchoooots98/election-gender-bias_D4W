@@ -20,7 +20,7 @@ Audience: anyone with repository access who needs to reproduce or debug a run.
 
 ## 1. Pipeline Inventory
 
-The repository implements six operational entry points. The first five are
+The repository implements eight operational entry points. The first seven are
 sequentially dependent; dbt build is also embedded in the news corpus pipeline.
 
 | Pipeline | Entry point | Produces | Typical runtime |
@@ -30,6 +30,8 @@ sequentially dependent; dbt build is also embedded in the news corpus pipeline.
 | **NLP input pipeline** | `make run-nlp-input-pipeline` | Materializes `silver.fact_mention_nlp_input` from existing `fact_mention` and `fact_article` Silver outputs | <30 sec |
 | **NLP lexicon pipeline** | `make run-nlp-lexicon-pipeline` | Materializes `silver.fact_stereotype_word_counts` from Phase 0 NLP input rows and the packaged versioned lexicon | <30 sec |
 | **NLP sentiment pipeline** | `make run-nlp-sentiment-pipeline` | Materializes `silver.fact_mention_nlp_summary` from Phase 0 NLP input rows and the optional Transformer sentiment model | Depends on CPU/GPU and model cache |
+| **NLP tone pipeline** | `make run-nlp-tone-pipeline` | Enriches `silver.fact_mention_nlp_summary` with target-aware tone from existing Phase 2 summary rows and `gold.sample_leaders` names | Depends on CPU/GPU and model cache |
+| **NLP tone sensitivity pipeline** | `make run-nlp-tone-sensitivity-pipeline` | Writes a tone threshold QA report and `gold.nlp_tone_threshold_sensitivity` from the Phase 3 summary table | <30 sec |
 | **dbt build** (embedded in news corpus) | `make dbt-build` | Refreshes all five Gold dbt mart tables and runs 37 schema tests | ~30 sec |
 
 **Dependency contract**: the news corpus pipeline reads `gold.sample_leaders` as its candidate scope.
@@ -37,8 +39,13 @@ The NLP input pipeline reads the Silver article and mention tables produced by t
 The NLP lexicon pipeline reads the Phase 0 NLP input table.
 The NLP sentiment pipeline also reads the Phase 0 NLP input table and requires
 the optional future NLP dependency set.
+The NLP tone pipeline reads the Phase 0 input table, the Phase 2 summary table,
+and `gold.sample_leaders` for candidate names.
+The NLP tone sensitivity pipeline reads the Phase 3 summary and
+`gold.sample_leaders` for gender segmentation. It does not load Transformer
+models.
 Always run sampling, then news corpus, then NLP input, then NLP lexicon and
-sentiment.
+sentiment, then NLP tone, then NLP tone sensitivity.
 
 ---
 
@@ -114,6 +121,12 @@ make run-nlp-lexicon-pipeline
 # Step 5 (optional): build the Phase 2 generic sentiment baseline
 pip install -r requirements-future.in
 make run-nlp-sentiment-pipeline
+
+# Step 6 (optional): enrich Phase 2 summary rows with target-aware tone
+make run-nlp-tone-pipeline
+
+# Step 7 (optional): audit tone coverage across probability thresholds
+make run-nlp-tone-sensitivity-pipeline
 ```
 
 ### Verification after each step
@@ -202,6 +215,51 @@ conn.close()
 "
 ```
 
+After the NLP tone pipeline:
+```bash
+python -c "
+import duckdb
+conn = duckdb.connect('warehouse/municipal.duckdb')
+summary = conn.execute(\"\"\"
+    SELECT
+        target_tone_label,
+        COUNT(*) AS row_count
+    FROM silver.fact_mention_nlp_summary
+    GROUP BY target_tone_label
+    ORDER BY target_tone_label
+\"\"\").fetchall()
+print(summary)
+conn.close()
+"
+```
+
+After the NLP tone sensitivity pipeline:
+```bash
+python -c "
+import json
+import duckdb
+
+report = json.load(open('data/gold/nlp_tone_sensitivity_report.json'))
+print('current summary:', report['current_summary'])
+print('gender gap:', report['gender_gap'])
+
+conn = duckdb.connect('warehouse/municipal.duckdb')
+coverage = conn.execute(\"\"\"
+    SELECT
+        threshold,
+        segment_type,
+        segment_value,
+        scoreable_mentions,
+        classified_mentions_at_threshold,
+        ROUND(classified_share_of_scoreable, 3) AS classified_share
+    FROM gold.nlp_tone_threshold_sensitivity
+    ORDER BY threshold, segment_type, segment_value
+\"\"\").fetchdf()
+print(coverage.to_string(index=False))
+conn.close()
+"
+```
+
 After dbt build:
 ```bash
 make dbt-build
@@ -209,8 +267,8 @@ make dbt-build
 ```
 
 NLP dbt tests are planned when `fact_mention_frame_score` and NLP summary
-fields feed Gold marts. Phase 0, Phase 1, and Phase 2 are covered by Python
-contract tests because they do not yet feed dbt marts.
+fields feed Gold marts. Phase 0 through Phase 3 are covered by Python contract
+tests because they do not yet feed dbt marts.
 
 ---
 
@@ -530,5 +588,6 @@ rejection counts with `accepted_record_count` in `meta.meta_news_import_batch`.
 | **No incremental news ingest** | The news corpus pipeline rebuilds all Silver/Gold tables from the full Europresse manifest on each run. Adding new exports re-processes the full history. |
 | **Web-scrape cache is local-only** | `data/bronze/news_web_fetch/` is git-ignored. A fresh clone has no cache; add `--enable-web-scrape` to rebuild it, which requires network access to news sites. |
 | **PLM cities excluded** | Paris, Lyon, Marseille arrondissement candidates are excluded from the analytical cohort. This is documented as a known scope limitation in README. |
-| **Target-aware tone and framing not implemented** | Phase 0 materializes `silver.fact_mention_nlp_input`, Phase 1 materializes deterministic stereotype lexicon counts, and Phase 2 materializes generic sentiment baseline outputs. Candidate-aware NLI tone, framing scores, and Gold NLP marts remain planned. `mart_framing_metrics` contains only `unclassified` rows until frame-score Silver outputs and dbt tests are added. |
+| **Framing and Gold NLP activation not implemented** | Phase 0 materializes `silver.fact_mention_nlp_input`, Phase 1 materializes deterministic stereotype lexicon counts, Phase 2 materializes generic sentiment baseline outputs, and Phase 3 enriches target-aware tone. Frame scores and Gold NLP marts remain planned. `mart_framing_metrics` contains only `unclassified` rows until frame-score Silver outputs and dbt tests are added. |
+| **Tone sensitivity is coverage-only** | `nlp_tone_sensitivity_report.json` varies the probability threshold and reports classified coverage by gender. It does not reconstruct alternate tone-label distributions because low-confidence raw top labels and full NLI probability vectors are not persisted in Silver. |
 | **Seed lexicon is sparse** | The Phase 1 lexicon is a minimal structural-validation seed. Expand and review the vocabulary before interpreting lexicon rates as statistical media-bias evidence. |

@@ -254,14 +254,19 @@ claims about media bias.
 
 ---
 
-## NLP Sentiment Baseline Metrics (`silver.fact_mention_nlp_summary`)
+## NLP Sentiment and Tone Metrics (`silver.fact_mention_nlp_summary`)
 
 Grain: **one row per article x candidate mention**. These are Phase 2 generic
-sentiment diagnostics, not candidate-aware tone or framing metrics.
+sentiment diagnostics plus Phase 3 target-aware tone audit signals. They do
+not activate dashboard-level NLP conclusions until Gold marts consume them.
 
 Model methodology source: `cmarkea/distilcamembert-base-sentiment`, documented
 as a French 1-5 star sentiment model trained on Amazon Reviews and Allocine:
 https://huggingface.co/cmarkea/distilcamembert-base-sentiment
+
+Tone methodology source: `cmarkea/distilcamembert-base-nli`, used as the
+primary French NLI model for candidate-aware tone hypotheses:
+https://huggingface.co/cmarkea/distilcamembert-base-nli
 
 ### `generic_sentiment_label`
 
@@ -282,6 +287,26 @@ https://huggingface.co/cmarkea/distilcamembert-base-sentiment
 | **Owner** | `src/nlp/sentiment.py` |
 | **Null contract** | NULL when `nlp_enrichment_status` is `skipped` or `failed`. |
 | **Interpretation** | Generic negative-to-positive baseline. Do not use it as the primary bias conclusion because the model is not conditioned on the candidate target. |
+
+### `target_tone_label`
+
+| Field | Value |
+|---|---|
+| **Definition** | Candidate-aware tone selected from NLI probabilities for the mention context |
+| **Accepted values** | `favorable`, `unfavorable`, `neutral`, `unclassified` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | Never NULL. Skipped, failed, or low-confidence rows use `unclassified`. |
+| **Interpretation** | Target-aware political tone audit signal. This is more appropriate than generic sentiment for candidate coverage because the hypothesis explicitly names the candidate. It remains a Silver model output until Gold marts and dashboard panels are activated. |
+
+### `target_tone_probability`
+
+| Field | Value |
+|---|---|
+| **Definition** | Probability for the selected tone label, or the top probability when the row is below the confidence threshold |
+| **Formula** | Highest NLI probability across `favorable`, `unfavorable`, and `neutral`; labels below `NLP_TONE_THRESHOLD` are persisted as `unclassified` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | NULL for skipped or failed rows; populated for scoreable Phase 3 rows. |
+| **Interpretation** | Confidence and threshold-sensitivity audit field. A low probability attached to `unclassified` means the model saw no confident tone, not that the mention had neutral tone. |
 
 ### `nlp_enrichment_status`
 
@@ -304,6 +329,53 @@ https://huggingface.co/cmarkea/distilcamembert-base-sentiment
 
 ---
 
+## NLP Tone Threshold Sensitivity (`gold.nlp_tone_threshold_sensitivity`)
+
+Grain: **one row per threshold x segment**. Segment is either overall
+(`segment_type = 'overall'`, `segment_value = 'all'`) or gender
+(`segment_type = 'gender'`, `segment_value IN ('F', 'M')`).
+
+This is a model QA artifact, not a dashboard metric. It supports sensitivity
+analysis for `NLP_TONE_THRESHOLD` by showing how candidate-aware tone coverage
+changes across a fixed threshold grid.
+
+### `threshold`
+
+| Field | Value |
+|---|---|
+| **Definition** | Candidate-aware tone probability cutoff being audited |
+| **Owner** | `src/nlp/tone_sensitivity.py` |
+| **Null contract** | Never NULL. Values are validated to be unique and within `[0, 1]`. |
+| **Interpretation** | Lower thresholds increase coverage but may accept weaker model confidence; higher thresholds reduce false-confidence risk but leave more rows unclassified. |
+
+### `classified_mentions_at_threshold`
+
+| Field | Value |
+|---|---|
+| **Definition** | Number of scoreable mention rows whose persisted top tone probability is at least `threshold` |
+| **Formula** | `COUNT(*) WHERE target_tone_probability >= threshold` among scoreable rows |
+| **Owner** | `src/nlp/tone_sensitivity.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Coverage count at the audited threshold. It should be compared with `scoreable_mentions`, not total corpus rows, because skipped rows never called the model. |
+
+### `classified_share_of_scoreable`
+
+| Field | Value |
+|---|---|
+| **Definition** | Share of scoreable mention rows classified at the audited threshold |
+| **Formula** | `classified_mentions_at_threshold / scoreable_mentions` |
+| **Owner** | `src/nlp/tone_sensitivity.py` |
+| **Null contract** | NULL only when a segment has zero scoreable rows. |
+| **Interpretation** | Primary sensitivity metric. Compare the female and male segment rows at the same threshold to see whether model coverage is balanced by gender. |
+
+Companion JSON artifact:
+- `data/gold/nlp_tone_sensitivity_report.json`
+- Includes current persisted label distribution, probability bins by gender,
+  female-minus-male coverage gap by threshold, and the explicit limitation that
+  alternate label distributions are not reconstructed from Silver.
+
+---
+
 ## Metric Freshness and SLA
 
 | Layer | Rebuilt when | SLA |
@@ -313,6 +385,8 @@ https://huggingface.co/cmarkea/distilcamembert-base-sentiment
 | Silver (NLP input) | `make run-nlp-input-pipeline` is run | Must pass Phase 0 contract tests before downstream NLP scoring |
 | Silver (NLP lexicon audit) | `make run-nlp-lexicon-pipeline` is run | Must pass Phase 1 contract tests before downstream NLP Gold activation |
 | Silver (NLP sentiment baseline) | `make run-nlp-sentiment-pipeline` is run | Requires optional Transformer dependencies and must pass Phase 2 contract tests |
+| Silver (NLP target-aware tone) | `make run-nlp-tone-pipeline` is run | Requires existing Phase 2 summary rows and optional Transformer dependencies |
+| Gold NLP tone sensitivity QA | `make run-nlp-tone-sensitivity-pipeline` is run | Must read a tone-enriched Phase 3 summary; does not load Transformer models |
 | Gold dbt marts | Embedded in `make run-news-corpus-pipeline` via `dbt run` | Must pass all 37 schema tests before the pipeline exits |
 | Gold regression | Embedded in news corpus pipeline | Recomputed on each run; `status` column records whether fit succeeded |
 | Dashboard | On Streamlit startup — reads Gold Parquet files | Reflects the last complete pipeline run |

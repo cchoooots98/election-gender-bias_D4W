@@ -2,7 +2,7 @@
 
 > Model type: logical table contracts for the current medallion architecture.
 > Physical storage lives in Parquet plus `warehouse/municipal.duckdb`.
-> Last updated: 2026-05-05
+> Last updated: 2026-05-06
 
 ---
 
@@ -16,9 +16,9 @@ slice** of the broader research design:
 The executable repository now materializes the 36-person viable-candidate
 cohort, the Europresse-first news corpus backbone, dbt-owned exposure/summary
 marts, Python-owned regression/bootstrap diagnostics, and the Phase 0 NLP input
-contract builder. The Phase 2 generic sentiment baseline is implemented as a
-separate Silver output table. Target-aware tone, framing, and Gold NLP
-activation remain planned extensions.
+contract builder. Phase 2 generic sentiment and Phase 3 target-aware tone are
+implemented in the Silver NLP summary table. Framing and Gold NLP activation
+remain planned extensions.
 
 Active news-analysis window for the implemented corpus slice:
 `2025-11-01` to `2026-04-30`.
@@ -28,8 +28,8 @@ The implemented layers are:
 | Layer | Status | Current contract |
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
-| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2 `fact_mention_nlp_summary`, and quarantine outputs |
-| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
+| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3 `fact_mention_nlp_summary`, and quarantine outputs |
+| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, Python-owned `mart_regression_results`, `mart_bootstrap_ci`, and NLP tone threshold QA artifacts |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
 ---
@@ -403,9 +403,9 @@ Current implemented quarantine outputs include:
 
 - Grain: one row per `mention_id`
 - Source: `silver.fact_mention_nlp_input`
-- Owner: Python module `src/nlp/sentiment.py`
-- Status: Phase 2 implemented as a generic sentiment baseline. Target-aware
-  tone and framing fields are reserved as placeholders until later phases.
+- Owner: Python modules `src/nlp/sentiment.py` and `src/nlp/nli.py`
+- Status: Phase 2 generic sentiment and Phase 3 target-aware tone are
+  implemented. Framing fields remain reserved placeholders until a later phase.
 - Role: compact mention-level NLP output table for model results that do not
   need one row per frame label.
 - Model contract:
@@ -417,15 +417,24 @@ Current implemented quarantine outputs include:
     `expected_star = sum(star * probability)` across stars 1 through 5.
   - The score is a generic review-domain sentiment diagnostic, not
     candidate-aware political tone and not a gender-bias conclusion.
+  - Target-aware tone uses `cmarkea/distilcamembert-base-nli` as the primary
+    French NLI model. Phase 3 builds candidate-specific hypotheses from
+    `gold.sample_leaders.full_name` using the exact template
+    `Le texte présente {candidate_name} de manière {}.`
+  - Low-confidence tone predictions below `NLP_TONE_THRESHOLD` are persisted
+    as `unclassified` while retaining the top probability for threshold audits.
 - DQ contract:
   - `mention_id` must be unique and must match the current NLP input table.
   - Scored rows require `input_hash`, `generic_sentiment_label`,
     `generic_sentiment_score`, `scored_at`, and `nlp_model_bundle_version`.
   - Failed rows require `error_type`.
   - `generic_sentiment_score` must be between `-1` and `1`.
-  - `target_tone_label` and `primary_frame_label` remain `unclassified` in
-    Phase 2; `target_tone_probability` and `primary_frame_probability` remain
-    NULL until Phase 3/4 Natural Language Inference outputs are implemented.
+  - `target_tone_label` must be `favorable`, `unfavorable`, `neutral`, or
+    `unclassified`.
+  - `target_tone_probability` is populated for scoreable Phase 3 rows and
+    remains NULL for skipped or failed rows.
+  - `primary_frame_label` remains `unclassified` and
+    `primary_frame_probability` remains NULL until framing is implemented.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -435,8 +444,8 @@ Current implemented quarantine outputs include:
 | `input_hash` | CHAR(32) | Must match the NLP input hash for scored rows |
 | `generic_sentiment_label` | VARCHAR | Top 1-5 star label from the baseline sentiment model |
 | `generic_sentiment_score` | DOUBLE | Expected-star score mapped to `[-1, 1]` |
-| `target_tone_label` | VARCHAR | `unclassified` until target-aware tone is implemented |
-| `target_tone_probability` | DOUBLE | NULL until a later target-aware tone phase |
+| `target_tone_label` | VARCHAR | Target-aware tone label: `favorable`, `unfavorable`, `neutral`, or `unclassified` |
+| `target_tone_probability` | DOUBLE | Selected tone probability for scoreable rows; NULL for skipped or failed rows |
 | `primary_frame_label` | VARCHAR | `unclassified` until framing is implemented |
 | `primary_frame_probability` | DOUBLE | NULL until a later framing phase |
 | `was_truncated_to_max_length` | BOOLEAN | Whether tokenizer input exceeded `NLP_MAX_TOKEN_LENGTH` |
@@ -626,9 +635,8 @@ Modeling note:
 - Grain: one row per sampled leader × frame label
 - Source: `silver.fact_mention`
 - Role: NLP pending contract. The current baseline stabilizes the table shape
-  with `unclassified` rows only; it does not support framing or tone
-  conclusions until the transformer NLP scorer writes frame labels and scores
-  into `fact_mention`.
+  with `unclassified` rows only; it does not support framing or dashboard tone
+  conclusions until NLP Silver outputs are promoted into Gold marts.
 
 ### `gold.mart_bias_indicators`
 
@@ -692,6 +700,39 @@ Modeling note:
   - `url_metadata_only_count`: queued rows retained as metadata-only rows
   - `web_scrape_failure_count`: queued rows whose scrape failed or returned
     unusably short text
+
+### `gold.nlp_tone_threshold_sensitivity`
+
+- Grain: one row per threshold x segment
+- Owner: Python module `src.nlp.tone_sensitivity`
+- Source: `silver.fact_mention_nlp_summary` joined to
+  `gold.sample_leaders.gender`
+- Storage:
+  - `data/gold/nlp_tone_threshold_sensitivity.parquet`
+  - DuckDB table `gold.nlp_tone_threshold_sensitivity`
+- Companion report:
+  - `data/gold/nlp_tone_sensitivity_report.json`
+- Role: model QA artifact for Phase 3 target-aware tone coverage. It audits
+  how the classified share of scoreable rows changes when the probability
+  threshold varies.
+- Scope limitation: this artifact does not reconstruct alternate tone-label
+  distributions. The Silver summary persists the final label and top
+  probability, not low-confidence raw top labels or full NLI probability
+  vectors.
+
+| Column | Type | Notes |
+|---|---|---|
+| `generated_at` | TIMESTAMP | UTC report generation timestamp |
+| `nlp_model_bundle_version` | VARCHAR | Single model-bundle version represented by the source summary |
+| `threshold` | DOUBLE | Probability threshold audited |
+| `segment_type` | VARCHAR | `overall` or `gender` |
+| `segment_value` | VARCHAR | `all`, `F`, or `M` |
+| `total_mentions` | INTEGER | Mentions in the segment |
+| `scoreable_mentions` | INTEGER | Rows with a persisted top tone probability |
+| `not_scoreable_mentions` | INTEGER | Rows skipped or failed before tone probability exists |
+| `classified_mentions_at_threshold` | INTEGER | Scoreable rows with `target_tone_probability >= threshold` |
+| `low_confidence_mentions_at_threshold` | INTEGER | Scoreable rows below the audited threshold |
+| `classified_share_of_scoreable` | DOUBLE | Classified share among scoreable rows |
 
 ---
 
@@ -785,4 +826,4 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
-| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, and Phase 2 `fact_mention_nlp_summary` exist; add target-aware tone, framing, and Gold activation next |
+| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3 `fact_mention_nlp_summary`, and tone threshold QA artifacts exist; add framing and Gold activation next |
