@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 from src.nlp.model_bundle import ModelBundleConfig
+from src.nlp.nli import TonePrediction
 from src.nlp.sentiment import SentimentPrediction
 
 try:
@@ -42,6 +43,24 @@ class ConfigurableSentimentRunner:
         return [self.predictions_by_text[text] for text in texts]
 
 
+class ConfigurableToneRunner:
+    """Mock NLI scorer returning configured predictions in input order."""
+
+    def __init__(self, predictions_by_mention_id: dict[str, TonePrediction]) -> None:
+        self.predictions_by_mention_id = predictions_by_mention_id
+        self.calls: list[list[str]] = []
+
+    def predict_batch(self, scoring_inputs):
+        """Return configured predictions for the requested mention IDs."""
+        self.calls.append(
+            [scoring_input.mention_id for scoring_input in scoring_inputs]
+        )
+        return [
+            self.predictions_by_mention_id[scoring_input.mention_id]
+            for scoring_input in scoring_inputs
+        ]
+
+
 @pytest.fixture
 def model_bundle_config_factory():
     """Return a factory for valid model-bundle test configurations."""
@@ -54,7 +73,7 @@ def model_bundle_config_factory():
             "nli_model_revision": "b" * 40,
             "nli_backup_model_name": "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
             "nli_backup_model_revision": "c" * 40,
-            "hypothesis_template_version": "candidate_tone_frame_v1",
+            "hypothesis_template_version": "candidate_tone_frame_v2",
             "tone_threshold": 0.6,
             "frame_threshold": 0.6,
             "max_token_length": 512,
