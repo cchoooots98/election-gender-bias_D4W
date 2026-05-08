@@ -53,6 +53,11 @@ switch ($Command) {
         Write-Host "  dbt-build"
         Write-Host "  run-sampling-pipeline"
         Write-Host "  run-news-corpus-pipeline"
+        Write-Host "  run-nlp-input-pipeline"
+        Write-Host "  run-nlp-lexicon-pipeline"
+        Write-Host "  run-nlp-sentiment-pipeline"
+        Write-Host "  run-nlp-tone-pipeline"
+        Write-Host "  run-nlp-tone-sensitivity-pipeline"
     }
     "lint" {
         Invoke-ProjectCommand $Python @("-m", "ruff", "check", "src/", "tests/", "scripts/")
@@ -96,6 +101,21 @@ switch ($Command) {
     }
     "run-news-corpus-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_news_corpus_pipeline")
+    }
+    "run-nlp-input-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_input_pipeline")
+    }
+    "run-nlp-lexicon-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_lexicon_pipeline")
+    }
+    "run-nlp-sentiment-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_sentiment_pipeline")
+    }
+    "run-nlp-tone-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_tone_pipeline")
+    }
+    "run-nlp-tone-sensitivity-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_tone_sensitivity_pipeline")
     }
     default {
         throw "Unknown command '$Command'. Run '.\scripts\dev.ps1 help' for the supported command list."

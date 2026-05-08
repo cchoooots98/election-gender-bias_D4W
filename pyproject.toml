@@ -15,6 +15,8 @@ run-news-corpus-pipeline = "src.cli.run_news_corpus_pipeline:main"
 run-nlp-input-pipeline = "src.cli.run_nlp_input_pipeline:main"
 run-nlp-lexicon-pipeline = "src.cli.run_nlp_lexicon_pipeline:main"
 run-nlp-sentiment-pipeline = "src.cli.run_nlp_sentiment_pipeline:main"
+run-nlp-tone-pipeline = "src.cli.run_nlp_tone_pipeline:main"
+run-nlp-tone-sensitivity-pipeline = "src.cli.run_nlp_tone_sensitivity_pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]
