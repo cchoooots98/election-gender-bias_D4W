@@ -111,7 +111,7 @@ SENTIMENT_MODEL_REVISION: str = os.getenv(
 )
 NLI_MODEL_REVISION: str = os.getenv(
     "NLI_MODEL_REVISION",
-    "e1b36710a19092e452f6f6a226a9a82ccd185dcb",
+    "9626115fdcb512e591bc8c5c7999ddbb325d5dc0",
 )
 NLI_BACKUP_MODEL_REVISION: str = os.getenv(
     "NLI_BACKUP_MODEL_REVISION",
@@ -134,7 +134,7 @@ NLP_MAX_TOKEN_LENGTH: int = int(os.getenv("NLP_MAX_TOKEN_LENGTH", "512"))
 NLP_TONE_THRESHOLD: float = float(os.getenv("NLP_TONE_THRESHOLD", "0.60"))
 NLP_FRAME_THRESHOLD: float = float(os.getenv("NLP_FRAME_THRESHOLD", "0.60"))
 NLP_HYPOTHESIS_TEMPLATE_VERSION: str = os.getenv(
-    "NLP_HYPOTHESIS_TEMPLATE_VERSION", "candidate_tone_frame_v1"
+    "NLP_HYPOTHESIS_TEMPLATE_VERSION", "candidate_tone_frame_v2"
 )
 NLP_MODEL_DEVICE: str = os.getenv("NLP_MODEL_DEVICE", "auto")
 
