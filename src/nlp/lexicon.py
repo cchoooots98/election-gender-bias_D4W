@@ -18,6 +18,10 @@ from typing import Any
 import pandas as pd
 
 from src.config.settings import SILVER_DIR, WAREHOUSE_PATH
+from src.nlp._validation import (
+    require_columns,
+    validate_unique_key,
+)
 from src.nlp.normalization import (
     is_null_or_blank,
     normalize_lexicon_text,
@@ -253,12 +257,12 @@ def validate_fact_stereotype_word_counts(
         DataQualityError: If required columns, primary-key uniqueness, counts,
             rates, terms, categories, or version metadata are invalid.
     """
-    _require_columns(
+    require_columns(
         dataframe=stereotype_word_counts_dataframe,
         required_columns=_REQUIRED_LEXICON_OUTPUT_COLUMNS,
         dataframe_name="fact_stereotype_word_counts",
     )
-    _validate_unique_key(
+    validate_unique_key(
         dataframe=stereotype_word_counts_dataframe,
         key_columns=("mention_id", "lexicon_category", "term"),
         dataframe_name="fact_stereotype_word_counts",
@@ -325,7 +329,7 @@ def _parse_lexicon_payload(payload: Any) -> LexiconConfig:
 
 def _validate_nlp_input_for_lexicon(nlp_input_dataframe: pd.DataFrame) -> None:
     """Validate the Phase 0 source rows needed by Phase 1."""
-    _require_columns(
+    require_columns(
         dataframe=nlp_input_dataframe,
         required_columns=_REQUIRED_NLP_INPUT_COLUMNS,
         dataframe_name="fact_mention_nlp_input",
@@ -333,7 +337,7 @@ def _validate_nlp_input_for_lexicon(nlp_input_dataframe: pd.DataFrame) -> None:
     missing_mention_id = nlp_input_dataframe["mention_id"].map(is_null_or_blank)
     if missing_mention_id.any():
         raise DataQualityError("fact_mention_nlp_input mention_id has blanks")
-    _validate_unique_key(
+    validate_unique_key(
         dataframe=nlp_input_dataframe,
         key_columns=("mention_id",),
         dataframe_name="fact_mention_nlp_input",
@@ -376,41 +380,6 @@ def _count_lexicon_terms(
             if candidate_tokens == lexicon_term.tokens:
                 term_counts[lexicon_term] += 1
     return term_counts
-
-
-def _require_columns(
-    *,
-    dataframe: pd.DataFrame,
-    required_columns: frozenset[str],
-    dataframe_name: str,
-) -> None:
-    """Raise when a DataFrame is missing contract columns."""
-    missing_columns = sorted(required_columns - set(dataframe.columns))
-    if missing_columns:
-        raise DataQualityError(
-            f"{dataframe_name} missing required columns: {missing_columns}"
-        )
-
-
-def _validate_unique_key(
-    *,
-    dataframe: pd.DataFrame,
-    key_columns: tuple[str, ...],
-    dataframe_name: str,
-) -> None:
-    """Raise when a declared primary key is duplicated."""
-    duplicate_mask = dataframe.duplicated(subset=list(key_columns), keep=False)
-    if duplicate_mask.any():
-        duplicate_examples = (
-            dataframe.loc[duplicate_mask, list(key_columns)]
-            .drop_duplicates()
-            .head(5)
-            .to_dict("records")
-        )
-        raise DataQualityError(
-            f"{dataframe_name} has duplicate key rows for {list(key_columns)}: "
-            f"{duplicate_examples}"
-        )
 
 
 def _validate_output_text_columns(

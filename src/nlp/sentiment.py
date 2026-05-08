@@ -18,6 +18,11 @@ from typing import Any, Protocol
 import pandas as pd
 
 from src.config.settings import SILVER_DIR, WAREHOUSE_PATH
+from src.nlp._validation import (
+    pipeline_device_arg,
+    require_columns,
+    validate_unique_key,
+)
 from src.nlp.model_bundle import ModelBundleConfig, build_model_bundle_config
 from src.nlp.normalization import is_null_or_blank
 from src.storage.tables import write_duckdb_table, write_parquet_table
@@ -210,7 +215,7 @@ class HuggingFaceSentimentRunner:
                 task="text-classification",
                 model=model,
                 tokenizer=tokenizer,
-                device=_pipeline_device_arg(self._model_bundle_config.device),
+                device=pipeline_device_arg(self._model_bundle_config.device),
             )
         except Exception as exc:
             raise SentimentModelLoadError(
@@ -419,7 +424,7 @@ def validate_fact_mention_nlp_summary(
     nlp_summary_dataframe: pd.DataFrame,
     nlp_input_dataframe: pd.DataFrame | None = None,
 ) -> None:
-    """Validate the Phase 2 NLP summary output table.
+    """Validate the mention-level NLP summary output table.
 
     Args:
         nlp_summary_dataframe: Candidate summary output.
@@ -430,7 +435,7 @@ def validate_fact_mention_nlp_summary(
         DataQualityError: If required columns, keys, statuses, sentiment fields,
             lineage, or model metadata violate the contract.
     """
-    _require_columns(
+    require_columns(
         dataframe=nlp_summary_dataframe,
         required_columns=_REQUIRED_NLP_SUMMARY_COLUMNS,
         dataframe_name="fact_mention_nlp_summary",
@@ -440,7 +445,7 @@ def validate_fact_mention_nlp_summary(
         dataframe_name="fact_mention_nlp_summary",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
     )
-    _validate_unique_key(
+    validate_unique_key(
         dataframe=nlp_summary_dataframe,
         key_columns=("mention_id",),
         dataframe_name="fact_mention_nlp_summary",
@@ -651,7 +656,7 @@ def _base_summary_row(
 
 def _validate_nlp_input_for_sentiment(nlp_input_dataframe: pd.DataFrame) -> None:
     """Validate Phase 0 rows before sentiment scoring."""
-    _require_columns(
+    require_columns(
         dataframe=nlp_input_dataframe,
         required_columns=_REQUIRED_NLP_INPUT_COLUMNS,
         dataframe_name="fact_mention_nlp_input",
@@ -661,7 +666,7 @@ def _validate_nlp_input_for_sentiment(nlp_input_dataframe: pd.DataFrame) -> None
         dataframe_name="fact_mention_nlp_input",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
     )
-    _validate_unique_key(
+    validate_unique_key(
         dataframe=nlp_input_dataframe,
         key_columns=("mention_id",),
         dataframe_name="fact_mention_nlp_input",
@@ -696,20 +701,6 @@ def _validate_nlp_input_for_sentiment(nlp_input_dataframe: pd.DataFrame) -> None
         )
 
 
-def _require_columns(
-    *,
-    dataframe: pd.DataFrame,
-    required_columns: frozenset[str],
-    dataframe_name: str,
-) -> None:
-    """Raise when a DataFrame is missing contract columns."""
-    missing_columns = sorted(required_columns - set(dataframe.columns))
-    if missing_columns:
-        raise DataQualityError(
-            f"{dataframe_name} missing required columns: {missing_columns}"
-        )
-
-
 def _validate_required_identifier_values(
     *,
     dataframe: pd.DataFrame,
@@ -725,27 +716,6 @@ def _validate_required_identifier_values(
                 f"{dataframe_name} has {invalid_count} null or blank "
                 f"{column_name} values"
             )
-
-
-def _validate_unique_key(
-    *,
-    dataframe: pd.DataFrame,
-    key_columns: tuple[str, ...],
-    dataframe_name: str,
-) -> None:
-    """Raise when a declared primary key is duplicated."""
-    duplicate_mask = dataframe.duplicated(subset=list(key_columns), keep=False)
-    if duplicate_mask.any():
-        duplicate_examples = (
-            dataframe.loc[duplicate_mask, list(key_columns)]
-            .drop_duplicates()
-            .head(5)
-            .to_dict("records")
-        )
-        raise DataQualityError(
-            f"{dataframe_name} has duplicate key rows for {list(key_columns)}: "
-            f"{duplicate_examples}"
-        )
 
 
 def _validate_status_values(nlp_summary_dataframe: pd.DataFrame) -> None:
@@ -849,7 +819,7 @@ def _validate_sentiment_columns(nlp_summary_dataframe: pd.DataFrame) -> None:
 
 
 def _validate_future_placeholder_columns(nlp_summary_dataframe: pd.DataFrame) -> None:
-    """Validate tone and frame placeholders reserved for later phases."""
+    """Validate controlled tone and frame columns."""
     non_null_tone_labels = nlp_summary_dataframe["target_tone_label"].dropna()
     unsupported_tones = ~non_null_tone_labels.isin(CONTROLLED_TONE_LABELS)
     if unsupported_tones.any():
@@ -1023,20 +993,6 @@ def _normalize_huggingface_results(
     if any(not isinstance(result_batch, list) for result_batch in raw_results):
         raise RuntimeError("Hugging Face sentiment pipeline returned invalid batches")
     return raw_results
-
-
-def _pipeline_device_arg(device: str) -> int | str:
-    """Convert persisted device metadata to a Hugging Face pipeline argument."""
-    normalized_device = device.strip().lower()
-    if normalized_device == "cpu":
-        return -1
-    if normalized_device == "cuda":
-        return 0
-    if normalized_device.startswith("cuda:"):
-        device_suffix = normalized_device.split(":", 1)[1]
-        if device_suffix.isdigit():
-            return int(device_suffix)
-    return device
 
 
 def _coerce_utc_timestamp(value: pd.Timestamp | str | None) -> pd.Timestamp:

@@ -23,6 +23,10 @@ from src.config.settings import (
     WAREHOUSE_PATH,
 )
 from src.ingest.news.normalize import stable_md5
+from src.nlp._validation import (
+    require_columns,
+    validate_unique_key,
+)
 from src.nlp.normalization import is_missing_scalar, is_null_or_blank
 from src.storage.tables import write_duckdb_table, write_parquet_table
 from src.transform._exceptions import DataQualityError
@@ -305,7 +309,7 @@ def validate_fact_mention_nlp_input(nlp_input_dataframe: pd.DataFrame) -> None:
         DataQualityError: If required columns, primary key uniqueness, hashes,
             skip reasons, word counts, eligibility flags, or version checks fail.
     """
-    _require_columns(
+    require_columns(
         dataframe=nlp_input_dataframe,
         required_columns=_REQUIRED_NLP_INPUT_COLUMNS,
         dataframe_name="fact_mention_nlp_input",
@@ -315,7 +319,7 @@ def validate_fact_mention_nlp_input(nlp_input_dataframe: pd.DataFrame) -> None:
         dataframe_name="fact_mention_nlp_input",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
     )
-    _validate_unique_key(
+    validate_unique_key(
         dataframe=nlp_input_dataframe,
         key_columns=("mention_id",),
         dataframe_name="fact_mention_nlp_input",
@@ -346,7 +350,7 @@ def _validate_word_thresholds(
 
 def _validate_fact_mention_source(fact_mention_dataframe: pd.DataFrame) -> None:
     """Validate source mention facts before deriving model inputs."""
-    _require_columns(
+    require_columns(
         dataframe=fact_mention_dataframe,
         required_columns=_REQUIRED_FACT_MENTION_COLUMNS,
         dataframe_name="fact_mention",
@@ -356,7 +360,7 @@ def _validate_fact_mention_source(fact_mention_dataframe: pd.DataFrame) -> None:
         dataframe_name="fact_mention",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
     )
-    _validate_unique_key(
+    validate_unique_key(
         dataframe=fact_mention_dataframe,
         key_columns=("mention_id",),
         dataframe_name="fact_mention",
@@ -365,7 +369,7 @@ def _validate_fact_mention_source(fact_mention_dataframe: pd.DataFrame) -> None:
 
 def _validate_fact_article_source(fact_article_dataframe: pd.DataFrame) -> None:
     """Validate article language source before joining to mention rows."""
-    _require_columns(
+    require_columns(
         dataframe=fact_article_dataframe,
         required_columns=_REQUIRED_FACT_ARTICLE_COLUMNS,
         dataframe_name="fact_article",
@@ -375,25 +379,11 @@ def _validate_fact_article_source(fact_article_dataframe: pd.DataFrame) -> None:
         dataframe_name="fact_article",
         identifier_columns=("canonical_article_id",),
     )
-    _validate_unique_key(
+    validate_unique_key(
         dataframe=fact_article_dataframe,
         key_columns=("canonical_article_id",),
         dataframe_name="fact_article",
     )
-
-
-def _require_columns(
-    *,
-    dataframe: pd.DataFrame,
-    required_columns: frozenset[str],
-    dataframe_name: str,
-) -> None:
-    """Raise when a DataFrame is missing contract columns."""
-    missing_columns = sorted(required_columns - set(dataframe.columns))
-    if missing_columns:
-        raise DataQualityError(
-            f"{dataframe_name} missing required columns: {missing_columns}"
-        )
 
 
 def _validate_required_identifier_values(
@@ -411,27 +401,6 @@ def _validate_required_identifier_values(
                 f"{dataframe_name} has {invalid_count} null or blank "
                 f"{column_name} values"
             )
-
-
-def _validate_unique_key(
-    *,
-    dataframe: pd.DataFrame,
-    key_columns: tuple[str, ...],
-    dataframe_name: str,
-) -> None:
-    """Raise when a declared primary key is duplicated."""
-    duplicate_mask = dataframe.duplicated(subset=list(key_columns), keep=False)
-    if duplicate_mask.any():
-        duplicate_examples = (
-            dataframe.loc[duplicate_mask, list(key_columns)]
-            .drop_duplicates()
-            .head(5)
-            .to_dict("records")
-        )
-        raise DataQualityError(
-            f"{dataframe_name} has duplicate key rows for {list(key_columns)}: "
-            f"{duplicate_examples}"
-        )
 
 
 def _validate_context_word_count(nlp_input_dataframe: pd.DataFrame) -> None:
