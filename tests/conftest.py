@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 from src.nlp.model_bundle import ModelBundleConfig
-from src.nlp.nli import TonePrediction
+from src.nlp.nli import FramePrediction, TonePrediction
 from src.nlp.sentiment import SentimentPrediction
 
 try:
@@ -47,6 +47,24 @@ class ConfigurableToneRunner:
     """Mock NLI scorer returning configured predictions in input order."""
 
     def __init__(self, predictions_by_mention_id: dict[str, TonePrediction]) -> None:
+        self.predictions_by_mention_id = predictions_by_mention_id
+        self.calls: list[list[str]] = []
+
+    def predict_batch(self, scoring_inputs):
+        """Return configured predictions for the requested mention IDs."""
+        self.calls.append(
+            [scoring_input.mention_id for scoring_input in scoring_inputs]
+        )
+        return [
+            self.predictions_by_mention_id[scoring_input.mention_id]
+            for scoring_input in scoring_inputs
+        ]
+
+
+class ConfigurableFrameRunner:
+    """Mock NLI frame scorer returning configured predictions in input order."""
+
+    def __init__(self, predictions_by_mention_id: dict[str, FramePrediction]) -> None:
         self.predictions_by_mention_id = predictions_by_mention_id
         self.calls: list[list[str]] = []
 
