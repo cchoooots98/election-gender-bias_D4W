@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
 from pathlib import Path
 
 import pandas as pd
@@ -24,7 +23,9 @@ from src.config.settings import (
 )
 from src.ingest.news.normalize import stable_md5
 from src.nlp._validation import (
+    coerce_utc_timestamp,
     require_columns,
+    validate_required_identifier_values,
     validate_unique_key,
 )
 from src.nlp.normalization import is_missing_scalar, is_null_or_blank
@@ -142,7 +143,7 @@ def build_fact_mention_nlp_input(
     _validate_fact_mention_source(fact_mention_dataframe)
     _validate_fact_article_source(fact_article_dataframe)
 
-    preparation_timestamp = _coerce_utc_timestamp(prepared_at)
+    preparation_timestamp = coerce_utc_timestamp(prepared_at)
     mention_dataframe = fact_mention_dataframe.loc[
         :, list(_FACT_MENTION_SOURCE_COLUMNS)
     ].copy()
@@ -314,7 +315,7 @@ def validate_fact_mention_nlp_input(nlp_input_dataframe: pd.DataFrame) -> None:
         required_columns=_REQUIRED_NLP_INPUT_COLUMNS,
         dataframe_name="fact_mention_nlp_input",
     )
-    _validate_required_identifier_values(
+    validate_required_identifier_values(
         dataframe=nlp_input_dataframe,
         dataframe_name="fact_mention_nlp_input",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
@@ -355,7 +356,7 @@ def _validate_fact_mention_source(fact_mention_dataframe: pd.DataFrame) -> None:
         required_columns=_REQUIRED_FACT_MENTION_COLUMNS,
         dataframe_name="fact_mention",
     )
-    _validate_required_identifier_values(
+    validate_required_identifier_values(
         dataframe=fact_mention_dataframe,
         dataframe_name="fact_mention",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
@@ -374,7 +375,7 @@ def _validate_fact_article_source(fact_article_dataframe: pd.DataFrame) -> None:
         required_columns=_REQUIRED_FACT_ARTICLE_COLUMNS,
         dataframe_name="fact_article",
     )
-    _validate_required_identifier_values(
+    validate_required_identifier_values(
         dataframe=fact_article_dataframe,
         dataframe_name="fact_article",
         identifier_columns=("canonical_article_id",),
@@ -384,23 +385,6 @@ def _validate_fact_article_source(fact_article_dataframe: pd.DataFrame) -> None:
         key_columns=("canonical_article_id",),
         dataframe_name="fact_article",
     )
-
-
-def _validate_required_identifier_values(
-    *,
-    dataframe: pd.DataFrame,
-    dataframe_name: str,
-    identifier_columns: Iterable[str],
-) -> None:
-    """Raise when core identifiers contain null or blank values."""
-    for column_name in identifier_columns:
-        invalid_identifier_mask = dataframe[column_name].map(is_null_or_blank)
-        if invalid_identifier_mask.any():
-            invalid_count = int(invalid_identifier_mask.sum())
-            raise DataQualityError(
-                f"{dataframe_name} has {invalid_count} null or blank "
-                f"{column_name} values"
-            )
 
 
 def _validate_context_word_count(nlp_input_dataframe: pd.DataFrame) -> None:
@@ -595,13 +579,3 @@ def _coerce_required_identifier(value: object, column_name: str) -> str:
     if is_null_or_blank(value):
         raise DataQualityError(f"{column_name} is required")
     return str(value).strip()
-
-
-def _coerce_utc_timestamp(value: pd.Timestamp | str | None) -> pd.Timestamp:
-    """Return a timezone-aware UTC timestamp."""
-    if value is None:
-        return pd.Timestamp.now(tz="UTC")
-    timestamp = pd.Timestamp(value)
-    if timestamp.tzinfo is None:
-        return timestamp.tz_localize("UTC")
-    return timestamp.tz_convert("UTC")

@@ -19,8 +19,10 @@ import pandas as pd
 
 from src.config.settings import SILVER_DIR, WAREHOUSE_PATH
 from src.nlp._validation import (
+    coerce_utc_timestamp,
     pipeline_device_arg,
     require_columns,
+    validate_required_identifier_values,
     validate_unique_key,
 )
 from src.nlp.model_bundle import ModelBundleConfig, build_model_bundle_config
@@ -307,7 +309,7 @@ def build_fact_mention_nlp_summary(
     """
     _validate_nlp_input_for_sentiment(nlp_input_dataframe)
     effective_model_bundle_config = model_bundle_config or build_model_bundle_config()
-    scoring_timestamp = _coerce_utc_timestamp(scored_at)
+    scoring_timestamp = coerce_utc_timestamp(scored_at)
     nlp_input_rows = nlp_input_dataframe.loc[
         :, list(_REQUIRED_NLP_INPUT_COLUMNS)
     ].copy()
@@ -440,7 +442,7 @@ def validate_fact_mention_nlp_summary(
         required_columns=_REQUIRED_NLP_SUMMARY_COLUMNS,
         dataframe_name="fact_mention_nlp_summary",
     )
-    _validate_required_identifier_values(
+    validate_required_identifier_values(
         dataframe=nlp_summary_dataframe,
         dataframe_name="fact_mention_nlp_summary",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
@@ -661,7 +663,7 @@ def _validate_nlp_input_for_sentiment(nlp_input_dataframe: pd.DataFrame) -> None
         required_columns=_REQUIRED_NLP_INPUT_COLUMNS,
         dataframe_name="fact_mention_nlp_input",
     )
-    _validate_required_identifier_values(
+    validate_required_identifier_values(
         dataframe=nlp_input_dataframe,
         dataframe_name="fact_mention_nlp_input",
         identifier_columns=_CORE_IDENTIFIER_COLUMNS,
@@ -699,23 +701,6 @@ def _validate_nlp_input_for_sentiment(nlp_input_dataframe: pd.DataFrame) -> None
         raise DataQualityError(
             "fact_mention_nlp_input inference-eligible rows must have input_hash"
         )
-
-
-def _validate_required_identifier_values(
-    *,
-    dataframe: pd.DataFrame,
-    dataframe_name: str,
-    identifier_columns: tuple[str, ...],
-) -> None:
-    """Raise when required identifiers contain null or blank values."""
-    for column_name in identifier_columns:
-        invalid_identifier_mask = dataframe[column_name].map(is_null_or_blank)
-        if invalid_identifier_mask.any():
-            invalid_count = int(invalid_identifier_mask.sum())
-            raise DataQualityError(
-                f"{dataframe_name} has {invalid_count} null or blank "
-                f"{column_name} values"
-            )
 
 
 def _validate_status_values(nlp_summary_dataframe: pd.DataFrame) -> None:
@@ -993,13 +978,3 @@ def _normalize_huggingface_results(
     if any(not isinstance(result_batch, list) for result_batch in raw_results):
         raise RuntimeError("Hugging Face sentiment pipeline returned invalid batches")
     return raw_results
-
-
-def _coerce_utc_timestamp(value: pd.Timestamp | str | None) -> pd.Timestamp:
-    """Return a timezone-aware UTC timestamp."""
-    if value is None:
-        return pd.Timestamp.now(tz="UTC")
-    timestamp = pd.Timestamp(value)
-    if timestamp.tzinfo is None:
-        return timestamp.tz_localize("UTC")
-    return timestamp.tz_convert("UTC")
