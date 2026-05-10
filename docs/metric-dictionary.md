@@ -3,7 +3,7 @@
 Canonical definitions for all analytical metrics published in the Gold layer.
 Consumers: Streamlit dashboard, regression audit, portfolio documentation.
 
-Last updated: 2026-05-05
+Last updated: 2026-05-11
 
 ---
 
@@ -308,6 +308,26 @@ https://huggingface.co/cmarkea/distilcamembert-base-nli
 | **Null contract** | NULL for skipped or failed rows; populated for scoreable Phase 3 rows. |
 | **Interpretation** | Confidence and threshold-sensitivity audit field. A low probability attached to `unclassified` means the model saw no confident tone, not that the mention had neutral tone. |
 
+### `primary_frame_label`
+
+| Field | Value |
+|---|---|
+| **Definition** | Highest-probability frame label accepted for the mention context |
+| **Accepted values** | `politique`, `vie_privee`, `apparence`, `scandale`, `personnalite`, `securite`, `unclassified` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | Never NULL. Skipped, failed, or low-confidence rows use `unclassified`. |
+| **Interpretation** | Compact summary field for the selected Phase 4 frame. Use the full `silver.fact_mention_frame_score` table for threshold tuning and multi-label QA because this field stores only the selected primary frame. |
+
+### `primary_frame_probability`
+
+| Field | Value |
+|---|---|
+| **Definition** | Probability for the selected primary frame |
+| **Formula** | Highest NLI probability across scorable frame labels when that probability is at least `NLP_FRAME_THRESHOLD` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | NULL for `unclassified`, skipped, or failed rows. |
+| **Interpretation** | Confidence field for the summary primary frame. A NULL value means no frame passed the configured threshold, not that the mention has no topic. |
+
 ### `nlp_enrichment_status`
 
 | Field | Value |
@@ -326,6 +346,67 @@ https://huggingface.co/cmarkea/distilcamembert-base-nli
 | **Owner** | `src/nlp/model_bundle.py` |
 | **Null contract** | Never NULL. |
 | **Interpretation** | Model provenance identifier. A changed bundle version means sentiment outputs were produced under different runtime metadata and should not be mixed without audit. Mutable revisions such as `main`, `master`, or `latest` are rejected by the model-bundle contract. |
+
+---
+
+## NLP Framing Metrics (`silver.fact_mention_frame_score`)
+
+Grain: **one row per article x candidate mention x scorable frame label**.
+These are Phase 4 Silver model outputs for QA, threshold tuning, and future
+Gold mart activation. The `unclassified` label is not emitted in this table; it
+is only a fallback value in `silver.fact_mention_nlp_summary`.
+
+Model methodology source: `cmarkea/distilcamembert-base-nli`, used as the
+primary French NLI model for multi-label frame hypotheses:
+https://huggingface.co/cmarkea/distilcamembert-base-nli
+
+### `frame_label`
+
+| Field | Value |
+|---|---|
+| **Definition** | Controlled frame label scored for the mention context |
+| **Accepted values** | `politique`, `vie_privee`, `apparence`, `scandale`, `personnalite`, `securite` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Frame vocabulary member being scored. `unclassified` is intentionally excluded because it is a fallback state, not a model hypothesis. |
+
+### `frame_probability`
+
+| Field | Value |
+|---|---|
+| **Definition** | Multi-label NLI probability for `frame_label` on the mention context |
+| **Formula** | Hugging Face zero-shot classification score for the exact `nli_hypothesis` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | Never NULL; validated to be within `[0, 1]`. |
+| **Interpretation** | Model confidence for one frame. Multiple frames may pass threshold for the same mention, so use `is_primary_frame` when a single selected frame is required. |
+
+### `is_primary_frame`
+
+| Field | Value |
+|---|---|
+| **Definition** | Boolean flag for the highest-probability frame that passed `NLP_FRAME_THRESHOLD` |
+| **Formula** | `TRUE` for the selected primary frame, otherwise `FALSE`; at most one row per mention may be `TRUE` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Reconciles the long frame-score table to `primary_frame_label` in the summary table. If no frame passes threshold, all rows for the mention are `FALSE`. |
+
+### `passes_threshold`
+
+| Field | Value |
+|---|---|
+| **Definition** | Whether `frame_probability >= NLP_FRAME_THRESHOLD` |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Threshold audit flag. It should not be treated as a mutually exclusive classification because the framing scorer runs in multi-label mode. |
+
+### `nli_hypothesis`
+
+| Field | Value |
+|---|---|
+| **Definition** | Exact French hypothesis string sent to the NLI model for this frame |
+| **Owner** | `src/nlp/nli.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Model-input lineage field. Persisting the hypothesis makes frame scores auditable when hypothesis templates or frame definitions change. |
 
 ---
 
@@ -386,6 +467,7 @@ Companion JSON artifact:
 | Silver (NLP lexicon audit) | `make run-nlp-lexicon-pipeline` is run | Must pass Phase 1 contract tests before downstream NLP Gold activation |
 | Silver (NLP sentiment baseline) | `make run-nlp-sentiment-pipeline` is run | Requires optional Transformer dependencies and must pass Phase 2 contract tests |
 | Silver (NLP target-aware tone) | `make run-nlp-tone-pipeline` is run | Requires existing Phase 2 summary rows and optional Transformer dependencies |
+| Silver (NLP framing) | `make run-nlp-framing-pipeline` is run | Requires current NLP summary rows and optional Transformer dependencies |
 | Gold NLP tone sensitivity QA | `make run-nlp-tone-sensitivity-pipeline` is run | Must read a tone-enriched Phase 3 summary; does not load Transformer models |
 | Gold dbt marts | Embedded in `make run-news-corpus-pipeline` via `dbt run` | Must pass all 37 schema tests before the pipeline exits |
 | Gold regression | Embedded in news corpus pipeline | Recomputed on each run; `status` column records whether fit succeeded |

@@ -13,9 +13,10 @@ Two architectural horizons coexist in this project:
 - **Implemented downstream slices (separate entry points)**: sampled cohort ->
   Europresse-first news corpus backbone -> DuckDB -> dbt Gold marts -> Python
   regression/bootstrap diagnostics -> Streamlit dashboard
-- **NLP enrichment slices**: Phase 0 input, Phase 1 lexicon audit, and Phase 2
-  generic sentiment baseline are implemented; target-aware tone, framing, and
-  richer analytical marts remain planned
+- **NLP enrichment slices**: Phase 0 input, Phase 1 lexicon audit, Phase 2
+  generic sentiment baseline, Phase 3 target-aware tone, and Phase 4 Silver
+  frame scoring are implemented; Gold NLP marts and richer analytical
+  activation remain planned
 
 This distinction matters for portfolio honesty: the runnable script currently
 delivers the implemented audit slice, not the entire future roadmap.
@@ -56,6 +57,7 @@ flowchart LR
             F4["fact_mention<br>nlp_input"]
             F5["fact_stereotype<br>word_counts"]
             F6["fact_mention<br>nlp_summary"]
+            F7["fact_mention<br>frame_score"]
         end
     end
 
@@ -63,10 +65,12 @@ flowchart LR
         N0["Phase 0<br>Mention context input"]
         N1["Phase 1<br>Stereotype lexicon counts"]
         N2["Phase 2<br>Sentiment baseline"]
-        N3["Planned<br>NLI tone and frames"]
+        N3["Phase 3<br>NLI target-aware tone"]
+        N4["Phase 4<br>NLI frames"]
         N0 --> N1
         N0 --> N2
-        N0 -.-> N3
+        N2 --> N3
+        N0 --> N4
     end
 
     subgraph GLD["Gold"]
@@ -96,9 +100,12 @@ flowchart LR
     F3 --> N0 --> F4
     F4 --> N1 --> F5
     F4 --> N2 --> F6
+    N2 --> N3 --> F6
+    F4 --> N4 --> F7
+    N4 --> F6
 
     G1 & F3 --> G2 & G3 & G4 & G5 & G6
-    F5 & F6 -. "future NLP Gold activation" .-> G3 & G4
+    F5 & F6 & F7 -. "future NLP Gold activation" .-> G3 & G4
     G5 --> G7 & G8
     G2 & G3 & G4 & G6 & G7 & G8 --> DASH["Streamlit Dashboard"]
 ```
@@ -109,8 +116,9 @@ stops after materializing `gold.candidate_universe` and `gold.sample_leaders`.
 through `news_source_record`, `fact_article_source`, `fact_article`,
 `fact_mention`, dbt-owned exposure/summary marts, and Python-owned regression
 diagnostics. Phase 0 NLP input preparation, Phase 1 deterministic lexicon
-counts, and Phase 2 generic sentiment baseline are implemented as separate CLI
-steps. Target-aware tone and framing blocks remain planned extensions.
+counts, Phase 2 generic sentiment baseline, Phase 3 target-aware tone, and
+Phase 4 Silver frame scoring are implemented as separate CLI steps. Gold NLP
+activation remains a planned extension.
 
 ---
 
@@ -234,6 +242,16 @@ erDiagram
         varchar nlp_model_bundle_version
     }
 
+    FACT_MENTION_FRAME_SCORE {
+        char    mention_id FK
+        varchar frame_label
+        float   frame_probability
+        boolean is_primary_frame
+        boolean passes_threshold
+        varchar nli_hypothesis
+        varchar nlp_model_bundle_version
+    }
+
     DIM_COMMUNE ||--o{ DIM_CANDIDATE_LEADER : "commune_insee"
     DIM_CANDIDATE_LEADER ||--o{ CANDIDATE_UNIVERSE : "leader_id"
     DIM_COMMUNE ||--o{ CANDIDATE_UNIVERSE : "commune_insee"
@@ -244,6 +262,7 @@ erDiagram
     FACT_MENTION ||--o| FACT_MENTION_NLP_INPUT : "mention_id"
     FACT_MENTION_NLP_INPUT ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
     FACT_MENTION_NLP_INPUT ||--o| FACT_MENTION_NLP_SUMMARY : "mention_id"
+    FACT_MENTION_NLP_INPUT ||--o{ FACT_MENTION_FRAME_SCORE : "mention_id"
 ```
 
 `is_incumbent` is a nullable boolean contract: `TRUE`/`FALSE` when a commune-level
@@ -262,7 +281,7 @@ sampling slices.
 | File format | Parquet (Snappy compressed) | Delta Lake / ORC |
 | Orchestration | Scripted runner now; Airflow planned | Prefect, Dagster, Airflow |
 | SQL mart layer | dbt-duckdb | dbt-snowflake, dbt-bigquery |
-| French NLP | DistilCamemBERT sentiment baseline implemented; CamemBERT NLI planned | BERT-style Transformer enrichment |
+| French NLP | DistilCamemBERT sentiment baseline + CamemBERT NLI tone and framing implemented | BERT-style Transformer enrichment |
 | Text extraction | pdfminer.six + BeautifulSoup + trafilatura fallback | Parser stack for archive exports |
 | Dashboard | Streamlit | Tableau, Looker |
 | CI/CD | GitHub Actions | Jenkins, CircleCI |

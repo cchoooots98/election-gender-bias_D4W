@@ -2,7 +2,7 @@
 
 > Model type: logical table contracts for the current medallion architecture.
 > Physical storage lives in Parquet plus `warehouse/municipal.duckdb`.
-> Last updated: 2026-05-06
+> Last updated: 2026-05-10
 
 ---
 
@@ -16,9 +16,9 @@ slice** of the broader research design:
 The executable repository now materializes the 36-person viable-candidate
 cohort, the Europresse-first news corpus backbone, dbt-owned exposure/summary
 marts, Python-owned regression/bootstrap diagnostics, and the Phase 0 NLP input
-contract builder. Phase 2 generic sentiment and Phase 3 target-aware tone are
-implemented in the Silver NLP summary table. Framing and Gold NLP activation
-remain planned extensions.
+contract builder. Phase 2 generic sentiment, Phase 3 target-aware tone, and
+Phase 4 frame scoring are implemented in Silver NLP tables. Gold NLP
+activation remains a planned extension.
 
 Active news-analysis window for the implemented corpus slice:
 `2025-11-01` to `2026-04-30`.
@@ -28,7 +28,7 @@ The implemented layers are:
 | Layer | Status | Current contract |
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
-| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3 `fact_mention_nlp_summary`, and quarantine outputs |
+| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, and quarantine outputs |
 | Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, Python-owned `mart_regression_results`, `mart_bootstrap_ci`, and NLP tone threshold QA artifacts |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
@@ -404,8 +404,9 @@ Current implemented quarantine outputs include:
 - Grain: one row per `mention_id`
 - Source: `silver.fact_mention_nlp_input`
 - Owner: Python modules `src/nlp/sentiment.py` and `src/nlp/nli.py`
-- Status: Phase 2 generic sentiment and Phase 3 target-aware tone are
-  implemented. Framing fields remain reserved placeholders until a later phase.
+- Status: Phase 2 generic sentiment, Phase 3 target-aware tone, and Phase 4
+  Silver framing are implemented. Gold framing marts still remain a later
+  activation phase.
 - Role: compact mention-level NLP output table for model results that do not
   need one row per frame label.
 - Model contract:
@@ -423,6 +424,12 @@ Current implemented quarantine outputs include:
     `Le texte présente {candidate_name} de manière {}.`
   - Low-confidence tone predictions below `NLP_TONE_THRESHOLD` are persisted
     as `unclassified` while retaining the top probability for threshold audits.
+  - Framing uses the same primary NLI model in multi-label mode against the
+    controlled frame vocabulary. All scorable frame probabilities are stored in
+    `silver.fact_mention_frame_score`.
+  - Low-confidence frame predictions below `NLP_FRAME_THRESHOLD` are persisted
+    as `unclassified` in the summary table. `unclassified` is a fallback state,
+    not a model-scored frame row.
 - DQ contract:
   - `mention_id` must be unique and must match the current NLP input table.
   - Scored rows require `input_hash`, `generic_sentiment_label`,
@@ -433,8 +440,10 @@ Current implemented quarantine outputs include:
     `unclassified`.
   - `target_tone_probability` is populated for scoreable Phase 3 rows and
     remains NULL for skipped or failed rows.
-  - `primary_frame_label` remains `unclassified` and
-    `primary_frame_probability` remains NULL until framing is implemented.
+  - `primary_frame_label` must be one of the controlled frame labels or
+    `unclassified`.
+  - `primary_frame_probability` is populated only when a scorable primary frame
+    passes the configured threshold.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -446,13 +455,42 @@ Current implemented quarantine outputs include:
 | `generic_sentiment_score` | DOUBLE | Expected-star score mapped to `[-1, 1]` |
 | `target_tone_label` | VARCHAR | Target-aware tone label: `favorable`, `unfavorable`, `neutral`, or `unclassified` |
 | `target_tone_probability` | DOUBLE | Selected tone probability for scoreable rows; NULL for skipped or failed rows |
-| `primary_frame_label` | VARCHAR | `unclassified` until framing is implemented |
-| `primary_frame_probability` | DOUBLE | NULL until a later framing phase |
+| `primary_frame_label` | VARCHAR | Primary frame label or `unclassified` fallback |
+| `primary_frame_probability` | DOUBLE | Selected primary frame probability; NULL when `unclassified` |
 | `was_truncated_to_max_length` | BOOLEAN | Whether tokenizer input exceeded `NLP_MAX_TOKEN_LENGTH` |
 | `nlp_enrichment_status` | VARCHAR | `scored`, `skipped`, or `failed` |
 | `nlp_model_bundle_version` | VARCHAR | Deterministic model-bundle hash from `src/nlp/model_bundle.py` |
 | `scored_at` | TIMESTAMP | UTC scoring timestamp for scored or failed rows |
 | `error_type` | VARCHAR | Required when `nlp_enrichment_status = 'failed'` |
+
+### `silver.fact_mention_frame_score`
+
+- Grain: one row per `mention_id` x scorable `frame_label`
+- Source: `silver.fact_mention_nlp_input.input_text`
+- Owner: Python module `src/nlp/nli.py`
+- Status: Phase 4 implemented as Silver model output. dbt Gold framing
+  activation remains a later phase.
+- Role: full multi-label NLI frame probabilities for QA, threshold tuning, and
+  future Gold marts.
+- DQ contract:
+  - Unique key is `mention_id`, `frame_label`.
+  - `frame_label` excludes `unclassified`; that label is only a summary
+    fallback.
+  - `frame_probability` must be between `0` and `1`.
+  - At most one frame may have `is_primary_frame = TRUE` per mention.
+  - Primary frames must pass the configured frame threshold.
+  - Every row must match a current NLP input mention.
+  - `nlp_model_bundle_version` is required on every row.
+
+| Column | Type | Notes |
+|---|---|---|
+| `mention_id` | VARCHAR | Foreign key to `silver.fact_mention_nlp_input` |
+| `frame_label` | VARCHAR | Controlled frame label, excluding `unclassified` |
+| `frame_probability` | DOUBLE | Multi-label NLI probability |
+| `is_primary_frame` | BOOLEAN | True for the selected primary frame |
+| `passes_threshold` | BOOLEAN | True when probability meets `NLP_FRAME_THRESHOLD` |
+| `nli_hypothesis` | VARCHAR | Exact hypothesis string used for the frame |
+| `nlp_model_bundle_version` | VARCHAR | Deterministic model-bundle hash |
 
 ### `silver.fact_stereotype_word_counts`
 
@@ -826,4 +864,4 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
-| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3 `fact_mention_nlp_summary`, and tone threshold QA artifacts exist; add framing and Gold activation next |
+| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, and tone threshold QA artifacts exist; add Gold activation next |
