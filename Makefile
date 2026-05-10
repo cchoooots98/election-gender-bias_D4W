@@ -29,7 +29,8 @@ DBT := $(DBT_EXE)
         notebook dashboard dbt-run dbt-test dbt-build run-sampling-pipeline \
         run-news-corpus-pipeline run-nlp-input-pipeline \
         run-nlp-lexicon-pipeline run-nlp-sentiment-pipeline \
-        run-nlp-tone-pipeline run-nlp-tone-sensitivity-pipeline \
+        run-nlp-tone-pipeline run-nlp-framing-pipeline \
+        run-nlp-tone-sensitivity-pipeline \
         run-news-corpus-sa48 run-news-corpus-sa-relaxed generate-manifest
 
 help:
@@ -64,6 +65,7 @@ help:
 	@echo "    run-nlp-lexicon-pipeline   materialize silver.fact_stereotype_word_counts"
 	@echo "    run-nlp-sentiment-pipeline materialize silver.fact_mention_nlp_summary"
 	@echo "    run-nlp-tone-pipeline      enrich fact_mention_nlp_summary with target-aware tone"
+	@echo "    run-nlp-framing-pipeline   enrich fact_mention_nlp_summary with primary frame scores"
 	@echo "    run-nlp-tone-sensitivity-pipeline audit tone coverage across thresholds"
 	@echo "    run-news-corpus-sa48       sensitivity analysis: expanded cohort (48 candidates)"
 	@echo "    run-news-corpus-sa-relaxed sensitivity analysis: relaxed sampling constraints"
@@ -125,6 +127,9 @@ run-nlp-sentiment-pipeline:
 
 run-nlp-tone-pipeline:
 	$(PYTHON) -m src.cli.run_nlp_tone_pipeline
+
+run-nlp-framing-pipeline:
+	$(PYTHON) -m src.cli.run_nlp_framing_pipeline
 
 run-nlp-tone-sensitivity-pipeline:
 	$(PYTHON) -m src.cli.run_nlp_tone_sensitivity_pipeline

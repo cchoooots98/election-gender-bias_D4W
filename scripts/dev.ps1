@@ -57,6 +57,7 @@ switch ($Command) {
         Write-Host "  run-nlp-lexicon-pipeline"
         Write-Host "  run-nlp-sentiment-pipeline"
         Write-Host "  run-nlp-tone-pipeline"
+        Write-Host "  run-nlp-framing-pipeline"
         Write-Host "  run-nlp-tone-sensitivity-pipeline"
     }
     "lint" {
@@ -113,6 +114,9 @@ switch ($Command) {
     }
     "run-nlp-tone-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_tone_pipeline")
+    }
+    "run-nlp-framing-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_framing_pipeline")
     }
     "run-nlp-tone-sensitivity-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_tone_sensitivity_pipeline")
