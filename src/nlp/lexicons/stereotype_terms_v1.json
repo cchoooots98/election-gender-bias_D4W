@@ -1,7 +1,7 @@
 {
   "lexicon_version": "stereotype_terms_v1",
   "description": "Minimal seed lexicon for deterministic French media framing and stereotype audit counts.",
-  "controlled_category_alignment": "Category names intentionally match the v1 controlled frame labels used by future fact_mention_frame_score outputs, excluding unclassified.",
+  "controlled_category_alignment": "Category names intentionally match the v1 controlled frame labels used by fact_mention_frame_score outputs, excluding unclassified.",
   "categories": [
     {
       "category": "politique",
