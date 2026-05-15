@@ -54,6 +54,13 @@ from src.nlp.normalization import (
     normalize_lexicon_text,
     tokenize_lexicon_text,
 )
+from src.nlp.qa import (
+    DEFAULT_NLP_QA_THRESHOLDS,
+    NLP_QA_REPORT_SCHEMA_VERSION,
+    build_nlp_qa_report,
+    materialize_nlp_qa_report,
+    validate_nlp_qa_sources,
+)
 from src.nlp.sentiment import (
     FACT_MENTION_NLP_SUMMARY_COLUMNS,
     SENTIMENT_STAR_LABELS,
@@ -79,6 +86,7 @@ __all__ = [
     "CONTROLLED_LEXICON_CATEGORIES",
     "CONTROLLED_FRAME_LABELS",
     "CONTROLLED_TARGET_TONE_LABELS",
+    "DEFAULT_NLP_QA_THRESHOLDS",
     "DEFAULT_TONE_SENSITIVITY_THRESHOLDS",
     "FACT_MENTION_FRAME_SCORE_COLUMNS",
     "FACT_MENTION_NLP_INPUT_COLUMNS",
@@ -94,6 +102,7 @@ __all__ = [
     "LexiconTerm",
     "ModelBundleConfig",
     "NLI_TONE_HYPOTHESIS_TEMPLATE_PATTERN",
+    "NLP_QA_REPORT_SCHEMA_VERSION",
     "NliModelLoadError",
     "SENTIMENT_STAR_LABELS",
     "SCORABLE_FRAME_LABELS",
@@ -105,6 +114,7 @@ __all__ = [
     "ToneSensitivityAnalysis",
     "TONE_SENSITIVITY_TABLE_COLUMNS",
     "TransformerDependencyError",
+    "build_nlp_qa_report",
     "build_tone_sensitivity_analysis",
     "build_frame_hypothesis",
     "build_tone_hypothesis_template",
@@ -123,6 +133,7 @@ __all__ = [
     "materialize_fact_mention_nlp_summary",
     "materialize_fact_mention_nlp_summary_with_frames",
     "materialize_fact_mention_nlp_summary_with_tone",
+    "materialize_nlp_qa_report",
     "materialize_tone_sensitivity_analysis",
     "materialize_fact_stereotype_word_counts",
     "normalize_lexicon_text",
@@ -134,4 +145,5 @@ __all__ = [
     "validate_fact_mention_frame_score",
     "validate_fact_mention_nlp_summary",
     "validate_fact_stereotype_word_counts",
+    "validate_nlp_qa_sources",
 ]
