@@ -3,7 +3,7 @@
 Canonical definitions for all analytical metrics published in the Gold layer.
 Consumers: Streamlit dashboard, regression audit, portfolio documentation.
 
-Last updated: 2026-05-11
+Last updated: 2026-05-15
 
 ---
 
@@ -457,6 +457,75 @@ Companion JSON artifact:
 
 ---
 
+## Unified NLP QA Report (`data/gold/nlp_qa_report.json`)
+
+Grain: **one JSON report per Phase 5 QA run**.
+
+This is a model-governance artifact, not a dashboard metric. It summarizes
+coverage, failures, threshold sensitivity, and model provenance across Phase
+0-4 NLP outputs before Gold NLP marts are activated.
+
+In Phase 5, `scoreable` means a mention has persisted model output for the
+audited task. It is distinct from the Phase 0 `eligible_for_inference` gate,
+which counts rows allowed to call Transformer models.
+
+### `input_coverage.total_mentions`
+
+| Field | Value |
+|---|---|
+| **Definition** | Number of rows in `silver.fact_mention_nlp_input` |
+| **Owner** | `src/nlp/qa.py` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Denominator for all mention-level NLP QA counters. |
+
+### `input_coverage.eligible_for_inference_mentions`
+
+| Field | Value |
+|---|---|
+| **Definition** | Number of Phase 0 input rows eligible for Transformer inference |
+| **Formula** | `COUNT(*) WHERE eligible_for_inference = TRUE` |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Measures how much of the mention corpus can support sentiment, tone, and framing model outputs. |
+
+### `output_coverage.tone.classified_share_of_scoreable`
+
+| Field | Value |
+|---|---|
+| **Definition** | Share of scoreable tone rows with a non-`unclassified` persisted label |
+| **Formula** | `classified_mentions / scoreable_mentions` from `silver.fact_mention_nlp_summary` |
+| **Owner** | `src/nlp/qa.py` |
+| **Null contract** | NULL only when no rows have `target_tone_probability`. |
+| **Interpretation** | Operational model-coverage signal. Low coverage indicates that the configured threshold is conservative or inputs are weak. |
+
+### `output_coverage.framing.primary_frame_share_of_frame_scored`
+
+| Field | Value |
+|---|---|
+| **Definition** | Share of frame-scored mentions with a selected primary frame |
+| **Formula** | `mentions_with_primary_frame / frame_scored_mentions` |
+| **Owner** | `src/nlp/qa.py` |
+| **Null contract** | NULL only when no frame-score rows exist. |
+| **Interpretation** | Frame acceptance coverage at the current `NLP_FRAME_THRESHOLD`. This is QA, not a bias conclusion. |
+
+### `threshold_sensitivity`
+
+| Field | Value |
+|---|---|
+| **Definition** | Tone and framing coverage recomputed over the Phase 5 threshold grid `(0.40, 0.50, 0.60, 0.70, 0.80)` |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Shows how sensitive classified coverage is to threshold choice without rerunning models. Frame sensitivity uses each mention's maximum persisted frame probability. |
+
+### `backup_model_agreement.status`
+
+| Field | Value |
+|---|---|
+| **Definition** | Whether precomputed backup-model outputs were supplied for agreement comparison |
+| **Accepted values** | `not_available`, `available` |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | `not_available` is the default for Phase 5 Core QA. The pipeline does not run backup inference; it only compares precomputed backup summaries when explicitly provided. |
+
+---
+
 ## Metric Freshness and SLA
 
 | Layer | Rebuilt when | SLA |
@@ -469,6 +538,7 @@ Companion JSON artifact:
 | Silver (NLP target-aware tone) | `make run-nlp-tone-pipeline` is run | Requires existing Phase 2 summary rows and optional Transformer dependencies |
 | Silver (NLP framing) | `make run-nlp-framing-pipeline` is run | Requires current NLP summary rows and optional Transformer dependencies |
 | Gold NLP tone sensitivity QA | `make run-nlp-tone-sensitivity-pipeline` is run | Must read a tone-enriched Phase 3 summary; does not load Transformer models |
+| Gold unified NLP QA | `make run-nlp-qa-pipeline` is run | Must read Phase 0-4 NLP artifacts; does not load Transformer models |
 | Gold dbt marts | Embedded in `make run-news-corpus-pipeline` via `dbt run` | Must pass all 37 schema tests before the pipeline exits |
 | Gold regression | Embedded in news corpus pipeline | Recomputed on each run; `status` column records whether fit succeeded |
 | Dashboard | On Streamlit startup — reads Gold Parquet files | Reflects the last complete pipeline run |

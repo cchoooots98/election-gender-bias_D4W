@@ -14,9 +14,9 @@ Two architectural horizons coexist in this project:
   Europresse-first news corpus backbone -> DuckDB -> dbt Gold marts -> Python
   regression/bootstrap diagnostics -> Streamlit dashboard
 - **NLP enrichment slices**: Phase 0 input, Phase 1 lexicon audit, Phase 2
-  generic sentiment baseline, Phase 3 target-aware tone, and Phase 4 Silver
-  frame scoring are implemented; Gold NLP marts and richer analytical
-  activation remain planned
+  generic sentiment baseline, Phase 3 target-aware tone, Phase 4 Silver frame
+  scoring, and Phase 5 unified QA reporting are implemented; Gold NLP marts
+  and richer analytical activation remain planned
 
 This distinction matters for portfolio honesty: the runnable script currently
 delivers the implemented audit slice, not the entire future roadmap.
@@ -67,10 +67,12 @@ flowchart LR
         N2["Phase 2<br>Sentiment baseline"]
         N3["Phase 3<br>NLI target-aware tone"]
         N4["Phase 4<br>NLI frames"]
+        N5["Phase 5<br>QA report"]
         N0 --> N1
         N0 --> N2
         N2 --> N3
         N0 --> N4
+        N0 & N1 & N2 & N3 & N4 --> N5
     end
 
     subgraph GLD["Gold"]
@@ -83,6 +85,7 @@ flowchart LR
         G6["dbt: mart_analysis_summary"]
         G7["Python: mart_regression_results"]
         G8["Python: mart_bootstrap_ci"]
+        G9["Python: nlp_qa_report.json"]
     end
 
     A1 --> B1
@@ -103,6 +106,7 @@ flowchart LR
     N2 --> N3 --> F6
     F4 --> N4 --> F7
     N4 --> F6
+    N5 --> G9
 
     G1 & F3 --> G2 & G3 & G4 & G5 & G6
     F5 & F6 & F7 -. "future NLP Gold activation" .-> G3 & G4
@@ -116,9 +120,9 @@ stops after materializing `gold.candidate_universe` and `gold.sample_leaders`.
 through `news_source_record`, `fact_article_source`, `fact_article`,
 `fact_mention`, dbt-owned exposure/summary marts, and Python-owned regression
 diagnostics. Phase 0 NLP input preparation, Phase 1 deterministic lexicon
-counts, Phase 2 generic sentiment baseline, Phase 3 target-aware tone, and
-Phase 4 Silver frame scoring are implemented as separate CLI steps. Gold NLP
-activation remains a planned extension.
+counts, Phase 2 generic sentiment baseline, Phase 3 target-aware tone, Phase 4
+Silver frame scoring, and Phase 5 unified QA reporting are implemented as
+separate CLI steps. Gold NLP activation remains a planned extension.
 
 ---
 

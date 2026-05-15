@@ -2,7 +2,7 @@
 
 > Model type: logical table contracts for the current medallion architecture.
 > Physical storage lives in Parquet plus `warehouse/municipal.duckdb`.
-> Last updated: 2026-05-10
+> Last updated: 2026-05-15
 
 ---
 
@@ -16,9 +16,9 @@ slice** of the broader research design:
 The executable repository now materializes the 36-person viable-candidate
 cohort, the Europresse-first news corpus backbone, dbt-owned exposure/summary
 marts, Python-owned regression/bootstrap diagnostics, and the Phase 0 NLP input
-contract builder. Phase 2 generic sentiment, Phase 3 target-aware tone, and
-Phase 4 frame scoring are implemented in Silver NLP tables. Gold NLP
-activation remains a planned extension.
+contract builder. Phase 2 generic sentiment, Phase 3 target-aware tone, Phase
+4 frame scoring, and Phase 5 unified NLP QA reporting are implemented. Gold
+NLP activation remains a planned extension.
 
 Active news-analysis window for the implemented corpus slice:
 `2025-11-01` to `2026-04-30`.
@@ -29,7 +29,7 @@ The implemented layers are:
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
 | Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, and quarantine outputs |
-| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, Python-owned `mart_regression_results`, `mart_bootstrap_ci`, and NLP tone threshold QA artifacts |
+| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, Python-owned `mart_regression_results`, `mart_bootstrap_ci`, NLP tone threshold QA artifacts, and `data/gold/nlp_qa_report.json` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
 ---
@@ -772,6 +772,46 @@ Modeling note:
 | `low_confidence_mentions_at_threshold` | INTEGER | Scoreable rows below the audited threshold |
 | `classified_share_of_scoreable` | DOUBLE | Classified share among scoreable rows |
 
+### `data/gold/nlp_qa_report.json`
+
+- Grain: one JSON report per Phase 5 NLP QA pipeline run
+- Owner: Python module `src.nlp.qa`
+- Sources:
+  - `silver.fact_mention_nlp_input`
+  - `silver.fact_mention_nlp_summary`
+  - `silver.fact_mention_frame_score`
+  - `silver.fact_stereotype_word_counts`
+- Role: unified model-governance artifact for NLP coverage, failure modes,
+  threshold sensitivity, and model provenance. It does not run Transformer
+  inference and does not activate Gold NLP marts.
+- Storage:
+  - `data/gold/nlp_qa_report.json`
+- Observability:
+  - `meta.meta_run.flow_name = 'nlp_qa_pipeline'`
+  - successful runs record `rows_ingested = 1` because the mention-level
+    counters live inside the JSON payload.
+- Backup-model contract:
+  - omitted backup outputs produce
+    `backup_model_agreement.status = 'not_available'`
+  - precomputed backup summaries may be supplied for agreement comparison, but
+    Phase 5 Core QA does not create those backup predictions.
+
+Top-level JSON fields:
+
+| Field | Notes |
+|---|---|
+| `report_name` | Fixed value `nlp_qa_report` |
+| `report_schema_version` | Fixed value `nlp_qa_report_v1` |
+| `generated_at` | UTC timestamp for the report |
+| `model_bundle` | Observed NLP bundle version and current local model-bundle metadata |
+| `source_tables` | Logical source names, row counts, and expected columns |
+| `input_coverage` | Total mentions, lexicon eligibility, inference eligibility, and skip reasons |
+| `output_coverage` | Sentiment, tone, frame, and stereotype coverage counters |
+| `failure_summary` | Skipped mentions by reason and failed mentions by error type |
+| `threshold_sensitivity` | Tone and framing coverage over the Phase 5 threshold grid |
+| `backup_model_agreement` | Agreement metrics when precomputed backup outputs are supplied; otherwise `not_available` |
+| `warnings` | Non-fatal governance caveats that must remain visible to consumers |
+
 ---
 
 ## Meta Layer
@@ -864,4 +904,4 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
-| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, and tone threshold QA artifacts exist; add Gold activation next |
+| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, tone threshold QA, and Phase 5 unified QA artifacts exist; add Gold NLP mart activation next |

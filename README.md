@@ -97,7 +97,7 @@ respective open licences. Sources include:
 The analysis is organised around three layers:
 
 1. **Exposure** - article counts, headline mentions, and number of distinct media sources per candidate, normalised by commune population.
-2. **Tone and framing** - a generic sentiment baseline, target-aware tone, Silver frame scoring, and tone threshold sensitivity QA are implemented for mention contexts; Gold frame distribution marts remain planned.
+2. **Tone and framing** - a generic sentiment baseline, target-aware tone, Silver frame scoring, tone threshold sensitivity QA, and unified NLP QA reporting are implemented for mention contexts; Gold frame distribution marts remain planned.
 3. **Bias indicators** - gender-level comparisons of framing distributions and stereotype-associated vocabulary frequency, with regression models controlling for city size, political bloc, incumbent status, and region.
 
 ---
@@ -203,6 +203,12 @@ thresholds by gender without loading Transformer models. It does not
 reconstruct alternate label distributions because the Silver summary does not
 persist low-confidence raw top labels or full NLI probability vectors.
 
+Phase 5 unified NLP QA is implemented as `data/gold/nlp_qa_report.json`. It
+summarizes input eligibility, skipped and failed rows, sentiment/tone/framing
+coverage, stereotype lexicon coverage, threshold sensitivity, and model-bundle
+provenance without running new model inference. Backup-model agreement is
+reported only when precomputed backup outputs are supplied.
+
 ---
 
 ## Limitations
@@ -212,7 +218,7 @@ persist low-confidence raw top labels or full NLI probability vectors.
 | **Single source** | All news data comes from Europresse, a subscription-based press aggregator. It covers major French dailies and regionals but excludes pure-digital outlets, social media, and broadcast transcripts. Coverage is not representative of the full French media ecosystem. |
 | **Matched cohort, not national sample** | The 36-candidate cohort is a stratified matched sample designed for controlled gender comparison, not for national-level inference. Findings describe this cohort; they cannot be extrapolated to all French municipal candidates. |
 | **Small n** | With n = 36, regression estimates are sensitive to individual high-leverage candidates (notably one large-city incumbent with 1,277 articles). Standard errors may be underestimated under Poisson equidispersion assumptions. |
-| **Gold NLP activation not yet implemented** | Deterministic lexicon counts, a generic sentiment baseline, target-aware NLI tone, and Silver NLI frame classification are implemented. NER and Gold NLP marts remain planned, and no dashboard-level tone or framing conclusions should be drawn until Gold NLP marts are activated. |
+| **Gold NLP activation not yet implemented** | Deterministic lexicon counts, a generic sentiment baseline, target-aware NLI tone, Silver NLI frame classification, and unified NLP QA reporting are implemented. NER and Gold NLP marts remain planned, and no dashboard-level tone or framing conclusions should be drawn until Gold NLP marts are activated. |
 | **Seed lexicon is intentionally sparse** | The Phase 1 lexicon validates deterministic counting contracts. It must be expanded and reviewed before lexicon rates are used as statistical media-bias evidence. |
 | **Observational design** | No causal claims are warranted. Associations between gender and coverage volume may reflect unmeasured confounders not captured by the available covariates. |
 
@@ -226,8 +232,8 @@ persist low-confidence raw top labels or full NLI probability vectors.
 > regression/bootstrap audit layer, Phase 0 NLP input preparation, Phase 1
 > deterministic lexicon counts, Phase 2 generic sentiment baseline, Phase 3
 > target-aware tone scoring, Phase 4 Silver frame scoring, tone threshold
-> sensitivity QA, and the Streamlit dashboard. Gold NLP activation remains a
-> planned extension.
+> sensitivity QA, Phase 5 unified NLP QA reporting, and the Streamlit
+> dashboard. Gold NLP activation remains a planned extension.
 
 ---
 
@@ -252,6 +258,7 @@ Examples:
 .\scripts\dev.ps1 run-news-corpus-pipeline
 .\scripts\dev.ps1 run-nlp-framing-pipeline
 .\scripts\dev.ps1 run-nlp-tone-sensitivity-pipeline
+.\scripts\dev.ps1 run-nlp-qa-pipeline
 ```
 
 If PowerShell blocks local scripts, run the same command through:
@@ -265,6 +272,7 @@ make run-sampling-pipeline
 make run-news-corpus-pipeline
 make run-nlp-framing-pipeline
 make run-nlp-tone-sensitivity-pipeline
+make run-nlp-qa-pipeline
 ```
 
 Both entrypoints are pinned to the project-local `.venv`, not the system PATH.
@@ -286,7 +294,7 @@ the standard pattern in modern data engineering (Databricks, dbt, Snowflake).
 |---|---|---|
 | **Bronze** | Faithful raw copies, append-only | `news_source_record`, `candidates_tour1/2`, `results_tour1/2`, `cog_communes`, `seats_population`, `rne_incumbents` |
 | **Silver** | Cleaned, validated, analysis-ready | `dim_commune`, `dim_candidate_leader`, `fact_election_result`, `fact_article_source`, `fact_article`, `fact_mention`, `fact_mention_nlp_input`, `fact_stereotype_word_counts`, `fact_mention_nlp_summary`, `fact_mention_frame_score` |
-| **Gold** | Consumer marts + cohort snapshot for dashboard | `candidate_universe`, `sample_leaders`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, and Python-owned `mart_regression_results`, `mart_bootstrap_ci` |
+| **Gold** | Consumer marts + cohort snapshot for dashboard | `candidate_universe`, `sample_leaders`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, Python-owned `mart_regression_results`, `mart_bootstrap_ci`, and `nlp_qa_report.json` |
 | **Meta** | Pipeline observability | `meta_run`, `meta_source_snapshot` |
 
 The central fact table is **`fact_mention`** (grain: one article x one
@@ -334,10 +342,12 @@ flowchart LR
         N2["Phase 2<br>Sentiment baseline"]
         N3["Phase 3<br>NLI target-aware tone"]
         N4["Phase 4<br>NLI frames"]
+        N5["Phase 5<br>QA report"]
         N0 --> N1
         N0 --> N2
         N2 --> N3
         N0 --> N4
+        N0 & N1 & N2 & N3 & N4 --> N5
     end
 
     subgraph GLD["Gold"]
@@ -350,6 +360,7 @@ flowchart LR
         G6["dbt: mart_analysis_summary"]
         G7["Python: mart_regression_results"]
         G8["Python: mart_bootstrap_ci"]
+        G9["Python: nlp_qa_report.json"]
     end
 
     A1 --> B1
@@ -369,6 +380,7 @@ flowchart LR
     N2 --> N3 --> F6
     F4 --> N4 --> F7
     N4 --> F6
+    N5 --> G9
 
     G1 & F3 --> G2 & G3 & G4 & G5 & G6
     F5 & F6 & F7 -. "future NLP Gold activation" .-> G3 & G4
@@ -383,6 +395,7 @@ Phase 1 deterministic stereotype counts, Phase 2 generic sentiment baseline,
 Phase 3 target-aware tone scoring,
 tone threshold sensitivity QA artifacts,
 Phase 4 Silver frame scoring,
+Phase 5 unified NLP QA reporting,
 dbt-owned exposure and summary marts, and Python-owned regression diagnostics.
 Gold NLP activation remains a planned extension on top of that implemented
 slice.
