@@ -30,7 +30,7 @@ DBT := $(DBT_EXE)
         run-news-corpus-pipeline run-nlp-input-pipeline \
         run-nlp-lexicon-pipeline run-nlp-sentiment-pipeline \
         run-nlp-tone-pipeline run-nlp-framing-pipeline \
-        run-nlp-tone-sensitivity-pipeline \
+        run-nlp-tone-sensitivity-pipeline run-nlp-qa-pipeline \
         run-news-corpus-sa48 run-news-corpus-sa-relaxed generate-manifest
 
 help:
@@ -67,6 +67,7 @@ help:
 	@echo "    run-nlp-tone-pipeline      enrich fact_mention_nlp_summary with target-aware tone"
 	@echo "    run-nlp-framing-pipeline   enrich fact_mention_nlp_summary with primary frame scores"
 	@echo "    run-nlp-tone-sensitivity-pipeline audit tone coverage across thresholds"
+	@echo "    run-nlp-qa-pipeline        build unified NLP QA governance report"
 	@echo "    run-news-corpus-sa48       sensitivity analysis: expanded cohort (48 candidates)"
 	@echo "    run-news-corpus-sa-relaxed sensitivity analysis: relaxed sampling constraints"
 	@echo "    generate-manifest          scan cohort dir, write news_import_manifest.json"
@@ -133,6 +134,9 @@ run-nlp-framing-pipeline:
 
 run-nlp-tone-sensitivity-pipeline:
 	$(PYTHON) -m src.cli.run_nlp_tone_sensitivity_pipeline
+
+run-nlp-qa-pipeline:
+	$(PYTHON) -m src.cli.run_nlp_qa_pipeline
 
 # Sensitivity analysis: expanded cohort (48 candidates, 24F + 24M).
 # Requires: data/raw/news/cohort_sa_48/news_import_manifest.json

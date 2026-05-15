@@ -59,6 +59,7 @@ switch ($Command) {
         Write-Host "  run-nlp-tone-pipeline"
         Write-Host "  run-nlp-framing-pipeline"
         Write-Host "  run-nlp-tone-sensitivity-pipeline"
+        Write-Host "  run-nlp-qa-pipeline"
     }
     "lint" {
         Invoke-ProjectCommand $Python @("-m", "ruff", "check", "src/", "tests/", "scripts/")
@@ -120,6 +121,9 @@ switch ($Command) {
     }
     "run-nlp-tone-sensitivity-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_tone_sensitivity_pipeline")
+    }
+    "run-nlp-qa-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_qa_pipeline")
     }
     default {
         throw "Unknown command '$Command'. Run '.\scripts\dev.ps1 help' for the supported command list."
