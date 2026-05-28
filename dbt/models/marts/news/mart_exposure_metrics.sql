@@ -14,7 +14,7 @@ with sample_leaders as (
         city_size_bucket,
         reg_code,
         nuance_group,
-        coalesce(cast(is_incumbent as boolean), false) as is_incumbent,
+        cast(is_incumbent as boolean) as is_incumbent,
         coalesce(cast(won_final_round as boolean), false) as won_final_round
     from {{ source('gold', 'sample_leaders') }}
 ),

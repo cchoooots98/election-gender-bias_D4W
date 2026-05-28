@@ -47,6 +47,10 @@ gini_by_gender as (
     group by gender
 ),
 
+bias_indicators as (
+    select * from {{ ref('mart_bias_indicators') }}
+),
+
 analysis_rows as (
     select
         'A1' as analysis_id,
@@ -345,6 +349,52 @@ analysis_rows as (
         ''
     from exposure
     group by city_size_bucket, gender
+),
+
+nlp_analysis_rows as (
+    select
+        'A5' as analysis_id,
+        'NLP Audit Signals' as analysis_name,
+        'gender' as dimension,
+        gender as group_label,
+        metric_name,
+        metric_value,
+        case
+            when metric_name = 'nlp_inference_coverage_rate'
+                then 'Coverage denominator for scoreable NLP outputs by gender'
+            when metric_name = 'mean_unfavorable_tone_share'
+                then 'Candidate-aware NLI tone share; descriptive audit signal only'
+            when metric_name = 'mean_policy_frame_share'
+                then 'Primary politique frame share among primary-frame-classified contexts'
+            when metric_name = 'mean_scandal_frame_share'
+                then 'Primary scandale frame share among primary-frame-classified contexts'
+            when metric_name = 'mean_appearance_private_life_frame_share'
+                then 'Primary apparence or vie_privee frame share among primary-frame-classified contexts'
+            when metric_name = 'generic_sentiment_coverage_rate'
+                then 'Generic sentiment baseline coverage; not candidate-aware tone'
+            when metric_name = 'mean_generic_sentiment_score'
+                then 'Generic sentiment baseline score; not candidate-aware tone'
+            when metric_name = 'mean_stereotype_count_per_1k_tokens'
+                then 'Seed lexicon count rate from mention contexts; sparse audit feature'
+            else ''
+        end as note
+    from bias_indicators
+    where metric_name in (
+        'nlp_inference_coverage_rate',
+        'mean_unfavorable_tone_share',
+        'mean_policy_frame_share',
+        'mean_scandal_frame_share',
+        'mean_appearance_private_life_frame_share',
+        'generic_sentiment_coverage_rate',
+        'mean_generic_sentiment_score',
+        'mean_stereotype_count_per_1k_tokens'
+    )
+),
+
+final_analysis_rows as (
+    select * from analysis_rows
+    union all
+    select * from nlp_analysis_rows
 )
 
 select
@@ -357,4 +407,4 @@ select
     metric_name,
     metric_value,
     note
-from analysis_rows
+from final_analysis_rows

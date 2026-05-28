@@ -264,6 +264,9 @@ def _write_stub_dbt_news_marts(duckdb_path: Path) -> None:
             for frame_label in frame_labels
         ]
     )
+    primary_frame_df = framing_df.rename(
+        columns={"mean_frame_score": "mean_primary_frame_score"}
+    )
     bias_df = (
         exposure_df.groupby("gender", dropna=False)
         .agg(metric_value=("article_count", "mean"))
@@ -286,6 +289,7 @@ def _write_stub_dbt_news_marts(duckdb_path: Path) -> None:
     for dataframe, table_name in [
         (exposure_df, "mart_exposure_metrics"),
         (framing_df, "mart_framing_metrics"),
+        (primary_frame_df, "mart_primary_frame_metrics"),
         (bias_df, "mart_bias_indicators"),
         (regression_feature_df, "mart_regression_feature_base"),
         (analysis_df, "mart_analysis_summary"),
@@ -376,6 +380,25 @@ def test_news_quality_checks_require_regression_status_column():
 
     with pytest.raises(DataQualityError, match="status"):
         run_news_corpus_quality_checks(**quality_inputs)
+
+
+def test_news_quality_checks_warn_on_cache_only_web_enrichment():
+    """Regression: cache-only web enrichment must be surfaced in QA."""
+    quality_inputs = _make_quality_check_inputs()
+
+    report = run_news_corpus_quality_checks(
+        **quality_inputs,
+        web_enrichment_report={
+            "web_scrape_queued_count": 10,
+            "web_scrape_cache_hit_count": 8,
+            "web_scrape_success_count": 0,
+            "url_metadata_only_count": 2,
+            "web_scrape_failure_count": 0,
+        },
+    )
+
+    assert report["warning_count"] == 1
+    assert "cache-only" in report["warnings"][0]
 
 
 def test_canonicalize_url_removes_sensitive_query_params():
@@ -1126,6 +1149,7 @@ def test_mart_exposure_contract_splits_full_text_and_metadata_only_counts(tmp_pa
     assert uncovered_rows["article_count"].sum() == 0
 
 
+@pytest.mark.smoke
 def test_run_news_corpus_etl_builds_24_row_exposure_mart(monkeypatch, tmp_path):
     """Integration: the main pipeline must preserve the full 24-candidate denominator."""
     dbt_calls = []
@@ -1217,8 +1241,8 @@ def test_run_news_corpus_etl_builds_24_row_exposure_mart(monkeypatch, tmp_path):
     assert qa_report["qa"]["zero_coverage_leader_count"] == 22
 
 
-def test_build_mart_regression_results_includes_bloc_and_region_controls():
-    """Regression: published model controls must be present in the fitted design."""
+def test_build_mart_regression_results_moves_bloc_and_region_to_sensitivity():
+    """Regression: high-dimensional controls are sensitivity-only at n=36."""
     exposure_rows = []
     leader_index = 1
     for city_size_bucket in ("small", "medium", "large"):
@@ -1264,10 +1288,29 @@ def test_build_mart_regression_results_includes_bloc_and_region_controls():
 
     regression_results_df = build_mart_regression_results(regression_feature_base_df)
 
-    variable_names = set(regression_results_df["variable_name"].astype(str))
-    assert any(name.startswith("nuance_group_") for name in variable_names)
-    assert any(name.startswith("reg_code_") for name in variable_names)
-    assert "won_final_round" in variable_names
+    primary_variables = set(
+        regression_results_df.loc[
+            regression_results_df["model_name"].eq("negbinom_exposure"),
+            "variable_name",
+        ].astype(str)
+    )
+    sensitivity_variables = set(
+        regression_results_df.loc[
+            regression_results_df["model_name"].eq("negbinom_exposure_full_controls"),
+            "variable_name",
+        ].astype(str)
+    )
+    assert {"const", "gender_female", "is_incumbent"}.issubset(primary_variables)
+    assert not any(name.startswith("nuance_group_") for name in primary_variables)
+    assert not any(name.startswith("reg_code_") for name in primary_variables)
+    assert "won_final_round" not in primary_variables
+    assert any(name.startswith("nuance_group_") for name in sensitivity_variables)
+    assert any(name.startswith("reg_code_") for name in sensitivity_variables)
+    assert "won_final_round" in sensitivity_variables
+    assert "q_value" in regression_results_df.columns
+    assert "parameter_count" in regression_results_df.columns
+    assert "inference_status" in regression_results_df.columns
+    assert "is_publishable" in regression_results_df.columns
 
 
 def test_build_regression_design_matrix_keeps_stable_column_order():
@@ -1307,7 +1350,7 @@ def test_build_regression_design_matrix_keeps_stable_column_order():
         ]
     )
 
-    design_matrix_df = regression_module._build_regression_design_matrix(modeling_df)
+    design_matrix_df = regression_module._build_sensitivity_design_matrix(modeling_df)
 
     assert design_matrix_df.columns.tolist() == [
         "const",
@@ -1338,10 +1381,55 @@ def test_build_regression_design_matrix_excludes_source_provenance_counts():
         ]
     )
 
-    design_matrix_df = regression_module._build_regression_design_matrix(modeling_df)
+    design_matrix_df = regression_module._build_sensitivity_design_matrix(modeling_df)
 
     assert "restricted_source_article_count" not in design_matrix_df.columns
     assert "supplemental_source_article_count" not in design_matrix_df.columns
+
+
+def test_build_mart_regression_results_excludes_unknown_incumbency():
+    """Regression: unknown incumbency is reported, not silently imputed false."""
+    feature_base_df = _make_feature_base(8)
+    feature_base_df["is_incumbent"] = feature_base_df["is_incumbent"].astype("object")
+    feature_base_df.loc[0, "is_incumbent"] = pd.NA
+
+    regression_results_df = build_mart_regression_results(feature_base_df)
+    primary_rows = regression_results_df.loc[
+        regression_results_df["model_name"].eq("negbinom_exposure")
+    ]
+
+    assert primary_rows["excluded_missing_control_count"].max() == 1
+    assert primary_rows["sample_size"].max() == 7
+
+
+def test_build_mart_regression_results_marks_machine_readable_inference_status():
+    """Regression: downstream reports need publishability, not just fit status."""
+    feature_base_df = _make_feature_base(24)
+
+    regression_results_df = build_mart_regression_results(feature_base_df)
+    gender_rows = regression_results_df.loc[
+        regression_results_df["variable_name"].eq("gender_female")
+    ]
+    primary_row = gender_rows.loc[
+        gender_rows["model_name"].eq("negbinom_exposure")
+    ].iloc[0]
+    poisson_row = gender_rows.loc[
+        gender_rows["model_name"].eq("poisson_exposure")
+    ].iloc[0]
+    placebo_row = regression_results_df.loc[
+        regression_results_df["model_name"].eq("negbinom_exposure_placebo")
+        & regression_results_df["variable_name"].eq("gender_female_placebo")
+    ].iloc[0]
+
+    assert primary_row["inference_status"] in {
+        "inconclusive",
+        "publishable_signal",
+    }
+    assert isinstance(bool(primary_row["is_publishable"]), bool)
+    assert poisson_row["inference_status"] == "diagnostic_only"
+    assert bool(poisson_row["is_publishable"]) is False
+    assert placebo_row["inference_status"] == "placebo_check"
+    assert bool(placebo_row["is_publishable"]) is False
 
 
 def test_build_mart_regression_results_marks_fit_warnings(monkeypatch):
@@ -1416,10 +1504,12 @@ def test_build_mart_regression_results_marks_fit_warnings(monkeypatch):
 
     regression_results_df = build_mart_regression_results(regression_feature_base_df)
 
-    # Both models are present and both must carry the warning status.
+    # All regression diagnostics must carry the warning status.
     assert set(regression_results_df["model_name"].unique()) == {
         "poisson_exposure",
         "negbinom_exposure",
+        "negbinom_exposure_full_controls",
+        "negbinom_exposure_placebo",
     }
     for model_name, model_rows_df in regression_results_df.groupby("model_name"):
         assert (
@@ -1464,6 +1554,7 @@ def _make_feature_base(n_candidates: int = 20) -> pd.DataFrame:
 
 def test_build_mart_bootstrap_ci_returns_expected_schema():
     """Bootstrap CI: output must contain all documented columns with correct types."""
+    pytest.importorskip("statsmodels")
     features_df = _make_feature_base()
     ci_df = build_mart_bootstrap_ci(features_df, n_bootstrap=50, random_seed=0)
 
@@ -1488,6 +1579,7 @@ def test_build_mart_bootstrap_ci_returns_expected_schema():
 
 def test_build_mart_bootstrap_ci_ci_bounds_ordered():
     """Bootstrap CI: lower bound must be <= observed coefficient <= upper bound (when CI is valid)."""
+    pytest.importorskip("statsmodels")
     features_df = _make_feature_base()
     ci_df = build_mart_bootstrap_ci(features_df, n_bootstrap=100, random_seed=1)
 
@@ -1507,6 +1599,7 @@ def test_build_mart_bootstrap_ci_ci_bounds_ordered():
 
 def test_build_mart_bootstrap_ci_reproducible_with_same_seed():
     """Bootstrap CI: identical seed must produce bit-for-bit identical CIs (reproducibility contract)."""
+    pytest.importorskip("statsmodels")
     features_df = _make_feature_base()
     ci_a = build_mart_bootstrap_ci(features_df, n_bootstrap=50, random_seed=99)
     ci_b = build_mart_bootstrap_ci(features_df, n_bootstrap=50, random_seed=99)
@@ -1524,6 +1617,7 @@ def test_build_mart_bootstrap_ci_empty_input_returns_empty():
     assert ci_df.empty
 
 
+@pytest.mark.smoke
 def test_run_news_corpus_etl_persists_redacted_text_artifacts(monkeypatch, tmp_path):
     """Regression: persisted Parquet artifacts must not retain full article text."""
     monkeypatch.setattr(

@@ -40,9 +40,8 @@ models:
         tests:
           - not_null
       - name: is_incumbent
-        description: "Boolean incumbency control, normalized before modeling."
+        description: "Nullable incumbency control; unknown matches are excluded from primary regression rather than silently imputed."
         tests:
-          - not_null
           - accepted_values:
               arguments:
                 values: [true, false]
@@ -100,8 +99,28 @@ models:
         tests:
           - not_null
 
+  - name: mart_frame_article_drilldown
+    description: "Article-level drilldown for primary-frame NLP findings."
+    columns:
+      - name: leader_id
+        description: "Sampled candidate leader identifier."
+        tests:
+          - not_null
+      - name: frame_label
+        description: "Selected primary frame label."
+        tests:
+          - not_null
+      - name: canonical_article_id
+        description: "Canonical article identifier."
+        tests:
+          - not_null
+      - name: title
+        description: "Article title used for review drilldown."
+        tests:
+          - not_null
+
   - name: mart_bias_indicators
-    description: "Gender-level exposure summary metrics for dashboard KPI blocks."
+    description: "Gender-level exposure and NLP audit summary metrics for dashboard KPI blocks."
     tests:
       - unique_combination_of_columns:
           arguments:
@@ -117,7 +136,7 @@ models:
               arguments:
                 values: ["F", "M"]
       - name: metric_name
-        description: "Name of the gender-level exposure metric."
+        description: "Name of the gender-level exposure or NLP audit metric."
         tests:
           - not_null
       - name: metric_value
@@ -163,7 +182,7 @@ models:
           - not_null
           - accepted_values:
               arguments:
-                values: ["A1", "A2", "A3", "A4"]
+                values: ["A1", "A2", "A3", "A4", "A5"]
       - name: analysis_name
         description: "Human-readable dashboard analysis section name."
         tests:
@@ -188,12 +207,17 @@ models:
         description: "Optional explanatory note for dashboard interpretation."
 
   - name: mart_framing_metrics
-    description: "NLP pending contract. Baseline row shape only; no tone or framing claim yet."
+    description: "Leader x frame mart backed by Silver NLP outputs when available, with an unclassified fallback before NLP activation."
     tests:
       - row_count_equals_multiple:
           arguments:
             compare_model: "{{ source('gold', 'sample_leaders') }}"
             multiplier: 7
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - leader_id
+              - frame_label
     columns:
       - name: leader_id
         tests:
@@ -211,3 +235,49 @@ models:
                   - personnalite
                   - securite
                   - unclassified
+      - name: mention_count
+        description: "Distinct mention count for the leader and frame label; unclassified captures skipped, failed, or below-threshold NLP rows."
+        tests:
+          - not_null
+      - name: mean_frame_score
+        description: "Average frame probability for scored frame labels; zero for unclassified and pre-NLP fallback rows."
+        tests:
+          - not_null
+
+  - name: mart_primary_frame_metrics
+    description: "Leader x primary-frame mart for dashboard gender comparisons; each mention contributes to one primary frame or unclassified."
+    tests:
+      - row_count_equals_multiple:
+          arguments:
+            compare_model: "{{ source('gold', 'sample_leaders') }}"
+            multiplier: 7
+      - unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - leader_id
+              - frame_label
+    columns:
+      - name: leader_id
+        tests:
+          - not_null
+      - name: frame_label
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - politique
+                  - vie_privee
+                  - apparence
+                  - scandale
+                  - personnalite
+                  - securite
+                  - unclassified
+      - name: mention_count
+        description: "Distinct mention count for the selected primary frame label."
+        tests:
+          - not_null
+      - name: mean_primary_frame_score
+        description: "Average primary-frame probability; zero for unclassified and pre-NLP fallback rows."
+        tests:
+          - not_null

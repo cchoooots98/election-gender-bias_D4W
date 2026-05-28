@@ -147,6 +147,15 @@ def run_news_corpus_quality_checks(
         }
     )
 
+    effective_web_enrichment_report = web_enrichment_report or {
+        "web_scrape_queued_count": 0,
+        "web_scrape_cache_hit_count": 0,
+        "web_scrape_success_count": 0,
+        "url_metadata_only_count": 0,
+        "web_scrape_failure_count": 0,
+    }
+    warnings = _build_quality_warnings(effective_web_enrichment_report)
+
     report = {
         "accepted_article_source_count": int(len(fact_article_source_df)),
         "rejected_article_source_count": int(len(fact_article_source_rejected_df)),
@@ -161,15 +170,22 @@ def run_news_corpus_quality_checks(
         "regression_failure_statuses": regression_failure_statuses,
         "regression_warning_count": len(regression_warning_statuses),
         "regression_failure_count": len(regression_failure_statuses),
+        "warnings": warnings,
+        "warning_count": len(warnings),
     }
-    report.update(
-        web_enrichment_report
-        or {
-            "web_scrape_queued_count": 0,
-            "web_scrape_cache_hit_count": 0,
-            "web_scrape_success_count": 0,
-            "url_metadata_only_count": 0,
-            "web_scrape_failure_count": 0,
-        }
-    )
+    report.update(effective_web_enrichment_report)
     return report
+
+
+def _build_quality_warnings(web_enrichment_report: dict[str, int]) -> list[str]:
+    """Return non-fatal data-quality warnings for the corpus QA report."""
+    queued_count = int(web_enrichment_report.get("web_scrape_queued_count", 0) or 0)
+    success_count = int(web_enrichment_report.get("web_scrape_success_count", 0) or 0)
+    failure_count = int(web_enrichment_report.get("web_scrape_failure_count", 0) or 0)
+    warnings: list[str] = []
+    if queued_count > 0 and success_count == 0 and failure_count == 0:
+        warnings.append(
+            "Web enrichment ran in cache-only mode: queued URL rows were handled "
+            "without new successful or failed network fetches."
+        )
+    return warnings

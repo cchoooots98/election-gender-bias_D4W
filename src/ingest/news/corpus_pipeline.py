@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -269,6 +270,7 @@ def run_news_corpus_etl(
     dbt_mart_names = [
         "mart_exposure_metrics",
         "mart_framing_metrics",
+        "mart_primary_frame_metrics",
         "mart_bias_indicators",
         "mart_regression_feature_base",
         "mart_analysis_summary",
@@ -336,6 +338,7 @@ def run_news_corpus_etl(
     qa_report_path = write_json_report(
         {
             "run_id": run_id,
+            "generated_at": datetime.now(UTC).isoformat(),
             "batch_id": manifest.batch_id,
             "source_system": manifest.source_system,
             "parser_mix": inspection.parser_mix,
@@ -371,6 +374,7 @@ def run_news_corpus_etl(
     )
     partial_signal_count += qa_report["regression_warning_count"]
     partial_signal_count += qa_report["regression_failure_count"]
+    partial_signal_count += qa_report["warning_count"]
     status = "partial" if partial_signal_count else "success"
     logger.info(
         "News corpus ETL complete run_id=%s batch_id=%s status=%s canonical_articles=%d mentions=%d",

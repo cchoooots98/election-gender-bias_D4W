@@ -13,7 +13,11 @@ select
     city_size_bucket,
     reg_code,
     nuance_group,
-    case when is_incumbent then 1 else 0 end as is_incumbent,
+    case
+        when is_incumbent is null then null
+        when is_incumbent then 1
+        else 0
+    end as is_incumbent,
     case when won_final_round then 1 else 0 end as won_final_round,
     population,
     article_count,
