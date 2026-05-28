@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.config.settings import GOLD_DIR
+from src.config.settings import BLESSED_NLP_MODEL_BUNDLE_VERSION, GOLD_DIR
 from src.nlp.input_contracts import (
     FACT_MENTION_NLP_INPUT_COLUMNS,
     validate_fact_mention_nlp_input,
@@ -27,6 +27,9 @@ from src.nlp.lexicon import (
 from src.nlp.model_bundle import ModelBundleConfig, build_model_bundle_config
 from src.nlp.nli import (
     FACT_MENTION_FRAME_SCORE_COLUMNS,
+    NLI_TONE_HYPOTHESIS_TEMPLATE_PATTERN,
+    SCORABLE_FRAME_LABELS,
+    build_frame_hypothesis,
     validate_fact_mention_frame_score,
 )
 from src.nlp.sentiment import (
@@ -41,6 +44,7 @@ logger = logging.getLogger(__name__)
 NLP_QA_REPORT_SCHEMA_VERSION = "nlp_qa_report_v1"
 DEFAULT_NLP_QA_THRESHOLDS: tuple[float, ...] = (0.40, 0.50, 0.60, 0.70, 0.80)
 _LOW_BACKUP_AGREEMENT_WARNING_THRESHOLD = 0.80
+TONE_ZERO_UNFAVORABLE_WARNING_THRESHOLD = 0.50
 
 _CONTROLLED_SKIP_REASON_ORDER: tuple[str, ...] = (
     "empty_context",
@@ -59,7 +63,9 @@ _TOP_LEVEL_REPORT_KEYS: tuple[str, ...] = (
     "output_coverage",
     "failure_summary",
     "threshold_sensitivity",
+    "hypothesis_examples",
     "backup_model_agreement",
+    "blessed_bundle_comparison",
     "warnings",
 )
 
@@ -179,13 +185,18 @@ def build_nlp_qa_report(
         nlp_summary_dataframe,
         backup_summary_dataframe,
     )
+    blessed_bundle_comparison = _build_blessed_bundle_comparison(
+        observed_bundle_version
+    )
     warnings = _build_warnings(
         nlp_input_dataframe=nlp_input_dataframe,
+        nlp_summary_dataframe=nlp_summary_dataframe,
         stereotype_word_counts_dataframe=stereotype_word_counts_dataframe,
         frame_score_dataframe=frame_score_dataframe,
         observed_bundle_version=observed_bundle_version,
         model_bundle_config=effective_model_bundle_config,
         backup_model_agreement=backup_model_agreement,
+        blessed_bundle_comparison=blessed_bundle_comparison,
     )
 
     report = {
@@ -219,7 +230,9 @@ def build_nlp_qa_report(
             frame_score_dataframe,
             thresholds=normalized_thresholds,
         ),
+        "hypothesis_examples": _build_hypothesis_examples(),
         "backup_model_agreement": backup_model_agreement,
+        "blessed_bundle_comparison": blessed_bundle_comparison,
         "warnings": warnings,
     }
     return {key: report[key] for key in _TOP_LEVEL_REPORT_KEYS}
@@ -557,6 +570,42 @@ def _build_frame_threshold_sensitivity(
     return sensitivity_rows
 
 
+def _build_hypothesis_examples() -> dict[str, object]:
+    """Return exact NLI hypothesis examples used by tone and frame scoring."""
+    return {
+        "tone_template": NLI_TONE_HYPOTHESIS_TEMPLATE_PATTERN,
+        "tone_example_candidate_name": "Candidate Example",
+        "tone_example_hypotheses": {
+            tone_label: NLI_TONE_HYPOTHESIS_TEMPLATE_PATTERN.format(
+                candidate_name="Candidate Example"
+            ).format(tone_label)
+            for tone_label in ("favorable", "defavorable", "neutre")
+        },
+        "frame_hypotheses": {
+            frame_label: build_frame_hypothesis(frame_label)
+            for frame_label in SCORABLE_FRAME_LABELS
+        },
+    }
+
+
+def _build_blessed_bundle_comparison(observed_bundle_version: str) -> dict[str, object]:
+    """Compare the observed bundle with an optional blessed baseline."""
+    if not BLESSED_NLP_MODEL_BUNDLE_VERSION:
+        return {
+            "status": "not_configured",
+            "observed_nlp_model_bundle_version": observed_bundle_version,
+            "blessed_nlp_model_bundle_version": None,
+            "matches_blessed_bundle": None,
+        }
+    matches_blessed_bundle = observed_bundle_version == BLESSED_NLP_MODEL_BUNDLE_VERSION
+    return {
+        "status": "matches" if matches_blessed_bundle else "differs",
+        "observed_nlp_model_bundle_version": observed_bundle_version,
+        "blessed_nlp_model_bundle_version": BLESSED_NLP_MODEL_BUNDLE_VERSION,
+        "matches_blessed_bundle": matches_blessed_bundle,
+    }
+
+
 def _build_backup_model_agreement(
     nlp_summary_dataframe: pd.DataFrame,
     backup_summary_dataframe: pd.DataFrame | None,
@@ -610,6 +659,17 @@ def _build_backup_model_agreement(
             == frame_comparison["primary_frame_label_backup"]
         ).sum()
     )
+    tone_kappa = _cohen_kappa(
+        tone_comparison["target_tone_label_primary"].astype(str).tolist(),
+        tone_comparison["target_tone_label_backup"].astype(str).tolist(),
+    )
+    frame_kappa = _cohen_kappa(
+        frame_comparison["primary_frame_label_primary"].astype(str).tolist(),
+        frame_comparison["primary_frame_label_backup"].astype(str).tolist(),
+    )
+    backup_scored_mentions = int(
+        backup_summary_dataframe["target_tone_probability"].notna().sum()
+    )
     return {
         "status": "available",
         "primary_model_bundle_version": _get_single_non_blank_value(
@@ -622,22 +682,55 @@ def _build_backup_model_agreement(
             "nlp_model_bundle_version",
             dataframe_name="backup_fact_mention_nlp_summary",
         ),
-        "common_mentions": int(len(comparison_dataframe)),
+        "backup_summary_joined_mentions": int(len(comparison_dataframe)),
+        "backup_scored_mentions": backup_scored_mentions,
         "tone_compared_mentions": int(len(tone_comparison)),
         "tone_agreement_rate": _safe_ratio(tone_matches, int(len(tone_comparison))),
+        "tone_cohens_kappa": tone_kappa,
         "frame_compared_mentions": int(len(frame_comparison)),
         "frame_agreement_rate": _safe_ratio(frame_matches, int(len(frame_comparison))),
+        "frame_cohens_kappa": frame_kappa,
     }
+
+
+def _cohen_kappa(primary_labels: list[str], backup_labels: list[str]) -> float | None:
+    """Return Cohen's kappa for two aligned categorical label sequences."""
+    if len(primary_labels) != len(backup_labels):
+        raise DataQualityError("Cohen kappa labels must be aligned")
+    label_count = len(primary_labels)
+    if label_count == 0:
+        return None
+
+    observed_agreement = (
+        sum(
+            primary_label == backup_label
+            for primary_label, backup_label in zip(
+                primary_labels, backup_labels, strict=True
+            )
+        )
+        / label_count
+    )
+    labels = sorted(set(primary_labels) | set(backup_labels))
+    expected_agreement = 0.0
+    for label in labels:
+        primary_share = primary_labels.count(label) / label_count
+        backup_share = backup_labels.count(label) / label_count
+        expected_agreement += primary_share * backup_share
+    if math.isclose(expected_agreement, 1.0):
+        return 1.0
+    return float((observed_agreement - expected_agreement) / (1 - expected_agreement))
 
 
 def _build_warnings(
     *,
     nlp_input_dataframe: pd.DataFrame,
+    nlp_summary_dataframe: pd.DataFrame,
     stereotype_word_counts_dataframe: pd.DataFrame,
     frame_score_dataframe: pd.DataFrame,
     observed_bundle_version: str,
     model_bundle_config: ModelBundleConfig,
     backup_model_agreement: dict[str, object],
+    blessed_bundle_comparison: dict[str, object],
 ) -> list[str]:
     """Return governance caveats and non-fatal completeness warnings."""
     warnings = [
@@ -671,6 +764,12 @@ def _build_warnings(
             "No frame-score rows are present despite inference-eligible "
             "mentions; Phase 4 framing may not have run."
         )
+    if _has_zero_unfavorable_low_tone_coverage(nlp_summary_dataframe):
+        warnings.append(
+            "Conservative threshold or under-calibrated NLI for unfavorable "
+            "polarity: no unfavorable tone rows were classified while tone "
+            "classification coverage is below 0.50."
+        )
     if backup_model_agreement.get("status") == "not_available":
         warnings.append(
             "Backup model agreement is unavailable because no precomputed "
@@ -697,7 +796,38 @@ def _build_warnings(
                 "outputs as requiring manual review before analytical "
                 "promotion."
             )
+    if blessed_bundle_comparison.get("status") == "differs":
+        warnings.append(
+            "Observed NLP output bundle differs from the configured blessed "
+            "bundle; compare findings only after explicit model-governance "
+            "approval."
+        )
     return warnings
+
+
+def _has_zero_unfavorable_low_tone_coverage(
+    nlp_summary_dataframe: pd.DataFrame,
+) -> bool:
+    """Return whether the tone output has zero unfavorable labels and low coverage."""
+    scored_rows = nlp_summary_dataframe.loc[
+        nlp_summary_dataframe["nlp_enrichment_status"].eq("scored")
+    ]
+    tone_scoreable_rows = scored_rows.loc[
+        scored_rows["target_tone_probability"].notna()
+    ]
+    if tone_scoreable_rows.empty:
+        return False
+    classified_rows = tone_scoreable_rows.loc[
+        tone_scoreable_rows["target_tone_label"].ne("unclassified")
+    ]
+    classified_share = len(classified_rows) / len(tone_scoreable_rows)
+    unfavorable_count = int(
+        classified_rows["target_tone_label"].eq("unfavorable").sum()
+    )
+    return (
+        unfavorable_count == 0
+        and classified_share < TONE_ZERO_UNFAVORABLE_WARNING_THRESHOLD
+    )
 
 
 def _validate_stereotype_rows_match_input(

@@ -130,6 +130,14 @@ def test_build_tone_sensitivity_analysis_reports_threshold_coverage():
         "does not reconstruct alternate label distributions"
         in report["analysis_scope"]["limitation"]
     )
+    label_bin_record = next(
+        record
+        for record in report["probability_bins_by_current_label"]
+        if record["segment_type"] == "overall"
+        and record["target_tone_label"] == "unclassified"
+        and record["probability_bin"] == "0.50-0.60"
+    )
+    assert label_bin_record["mentions"] == 1
 
 
 def test_build_tone_sensitivity_analysis_computes_gender_gap():
@@ -149,6 +157,26 @@ def test_build_tone_sensitivity_analysis_computes_gender_gap():
             "female_minus_male_classified_share": 0.5,
         }
     ]
+
+
+def test_build_tone_sensitivity_analysis_handles_zero_and_one_thresholds():
+    """Boundary: exact 0 and 1 thresholds remain valid probability cutoffs."""
+    analysis = build_tone_sensitivity_analysis(
+        _summary_dataframe(),
+        _sample_leaders_dataframe(),
+        thresholds=[0.0, 1.0],
+        generated_at=datetime(2026, 5, 6, 12, 0, tzinfo=UTC),
+    )
+
+    threshold_lookup = {
+        row.threshold: row.classified_mentions_at_threshold
+        for row in analysis.sensitivity_table.loc[
+            analysis.sensitivity_table["segment_type"].eq("overall")
+        ].itertuples(index=False)
+    }
+
+    assert threshold_lookup[0.0] == 4
+    assert threshold_lookup[1.0] == 0
 
 
 def test_build_tone_sensitivity_analysis_normalizes_labels_without_mutation():

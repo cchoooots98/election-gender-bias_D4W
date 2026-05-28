@@ -283,6 +283,10 @@ def materialize_fact_mention_nlp_input(
         min_lexicon_words=min_lexicon_words,
         min_inference_words=min_inference_words,
     )
+    validate_nlp_input_mentions_match_fact_mentions(
+        nlp_input_dataframe,
+        fact_mention_dataframe,
+    )
     parquet_path = silver_dir / "fact_mention_nlp_input.parquet"
     write_parquet_table(nlp_input_dataframe, parquet_path)
     write_duckdb_table(
@@ -333,6 +337,56 @@ def validate_fact_mention_nlp_input(nlp_input_dataframe: pd.DataFrame) -> None:
     _validate_skip_reason_contract(nlp_input_dataframe)
     _validate_version_and_timestamp(nlp_input_dataframe)
     _warn_on_oversized_input_text(nlp_input_dataframe)
+
+
+def validate_nlp_input_mentions_match_fact_mentions(
+    nlp_input_dataframe: pd.DataFrame,
+    fact_mention_dataframe: pd.DataFrame,
+) -> None:
+    """Validate that Phase 0 NLP input rows exactly match source mentions.
+
+    Args:
+        nlp_input_dataframe: Candidate ``silver.fact_mention_nlp_input`` rows.
+        fact_mention_dataframe: Source ``silver.fact_mention`` rows.
+
+    Raises:
+        DataQualityError: If either table is missing ``mention_id`` or if the
+            NLP input table contains orphan mentions or misses source mentions.
+    """
+    require_columns(
+        dataframe=nlp_input_dataframe,
+        required_columns={"mention_id"},
+        dataframe_name="fact_mention_nlp_input",
+    )
+    require_columns(
+        dataframe=fact_mention_dataframe,
+        required_columns={"mention_id"},
+        dataframe_name="fact_mention",
+    )
+    validate_unique_key(
+        dataframe=nlp_input_dataframe,
+        key_columns=("mention_id",),
+        dataframe_name="fact_mention_nlp_input",
+    )
+    validate_unique_key(
+        dataframe=fact_mention_dataframe,
+        key_columns=("mention_id",),
+        dataframe_name="fact_mention",
+    )
+
+    input_mentions = set(nlp_input_dataframe["mention_id"].astype(str))
+    source_mentions = set(fact_mention_dataframe["mention_id"].astype(str))
+    orphan_mentions = sorted(input_mentions - source_mentions)
+    missing_mentions = sorted(source_mentions - input_mentions)
+    if orphan_mentions or missing_mentions:
+        raise DataQualityError(
+            "fact_mention_nlp_input mention_id set must exactly match "
+            "fact_mention; "
+            f"orphan_count={len(orphan_mentions)} "
+            f"missing_count={len(missing_mentions)} "
+            f"orphan_examples={orphan_mentions[:5]} "
+            f"missing_examples={missing_mentions[:5]}"
+        )
 
 
 def _validate_word_thresholds(
@@ -446,14 +500,13 @@ def _validate_skip_reason_contract(nlp_input_dataframe: pd.DataFrame) -> None:
             "fact_mention_nlp_input inference eligibility requires lexicon eligibility"
         )
 
-    skipped_reason_missing = nlp_input_dataframe.loc[
-        ~eligible_for_inference, "skip_reason"
-    ].isna() | nlp_input_dataframe.loc[~eligible_for_inference, "skip_reason"].astype(
-        str
-    ).str.strip().eq(
-        ""
+    skipped_skip_reasons = (
+        nlp_input_dataframe.loc[~eligible_for_inference, "skip_reason"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
     )
-    if skipped_reason_missing.any():
+    if skipped_skip_reasons.eq("").any():
         raise DataQualityError(
             "fact_mention_nlp_input skip_reason is required for skipped rows"
         )

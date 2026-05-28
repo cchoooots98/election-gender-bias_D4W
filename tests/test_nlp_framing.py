@@ -151,6 +151,41 @@ def test_select_primary_frame_returns_unclassified_without_probability():
     assert probability is None
 
 
+def test_select_primary_frame_handles_zero_and_one_thresholds():
+    """Boundary: exact 0 and 1 thresholds should have explicit behavior."""
+    label_at_zero, probability_at_zero = select_primary_frame(
+        _frame_prediction(politique=0.42, personnalite=0.41).probabilities_by_label,
+        threshold=0.0,
+    )
+    label_at_one, probability_at_one = select_primary_frame(
+        _frame_prediction(politique=0.99, personnalite=0.01).probabilities_by_label,
+        threshold=1.0,
+    )
+
+    assert label_at_zero == "politique"
+    assert probability_at_zero == pytest.approx(0.42)
+    assert label_at_one == "unclassified"
+    assert probability_at_one is None
+
+
+def test_select_primary_frame_uses_per_frame_thresholds():
+    """Regression: each frame label can carry its own governance threshold."""
+    label, probability = select_primary_frame(
+        _frame_prediction(politique=0.82, personnalite=0.81).probabilities_by_label,
+        thresholds_by_frame={
+            "apparence": 0.6,
+            "personnalite": 0.6,
+            "politique": 0.9,
+            "scandale": 0.6,
+            "securite": 0.6,
+            "vie_privee": 0.6,
+        },
+    )
+
+    assert label == "unclassified"
+    assert probability is None
+
+
 @pytest.mark.parametrize("invalid_threshold", [-0.01, 1.01, float("nan")])
 def test_select_primary_frame_raises_on_invalid_threshold(invalid_threshold):
     """Error path: frame thresholds must be finite probabilities."""
@@ -478,6 +513,41 @@ def test_huggingface_nli_frame_runner_raises_only_when_scoring_is_requested(
                 )
             ]
         )
+
+
+def test_huggingface_nli_frame_runner_loads_pytorch_bin_weights(
+    fake_transformers_zero_shot,
+    model_bundle_config_factory,
+):
+    """Regression: frame scoring uses the same explicit NLI weight format."""
+    model_bundle_config = model_bundle_config_factory()
+    runner = HuggingFaceNliFrameRunner(model_bundle_config)
+
+    predictions = runner.predict_batch(
+        [
+            FrameScoringInput(
+                mention_id="mention-001",
+                input_text="Alice Martin presente son programme local.",
+            )
+        ]
+    )
+
+    model_kwargs = fake_transformers_zero_shot["model"][0]["kwargs"]
+    tokenizer_kwargs = fake_transformers_zero_shot["tokenizer"][0]["kwargs"]
+    assert len(fake_transformers_zero_shot["model"]) == 1
+    assert (
+        fake_transformers_zero_shot["model"][0]["disable_safetensors_conversion"] == "1"
+    )
+    assert model_kwargs["revision"] == model_bundle_config.nli_model_revision
+    assert model_kwargs["use_safetensors"] is False
+    assert tokenizer_kwargs == {
+        "revision": model_bundle_config.nli_model_revision,
+        "use_fast": False,
+    }
+    assert fake_transformers_zero_shot["pipeline"][0]["task"] == (
+        "zero-shot-classification"
+    )
+    assert predictions[0].probabilities_by_label["politique"] == pytest.approx(0.90)
 
 
 def test_materialize_fact_mention_nlp_summary_with_frames_writes_outputs(

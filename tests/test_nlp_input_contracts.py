@@ -13,6 +13,7 @@ from src.nlp.input_contracts import (
     compute_input_hash,
     materialize_fact_mention_nlp_input,
     validate_fact_mention_nlp_input,
+    validate_nlp_input_mentions_match_fact_mentions,
 )
 from src.transform._exceptions import DataQualityError
 
@@ -299,6 +300,56 @@ def test_build_fact_mention_nlp_input_hash_is_invariant_to_repeated_whitespace()
     )
 
     assert nlp_input_a.loc[0, "input_hash"] == nlp_input_b.loc[0, "input_hash"]
+
+
+def test_validate_nlp_input_mentions_match_fact_mentions_accepts_exact_set():
+    """Happy path: the NLP input contract is closed over source mention IDs."""
+    nlp_input_dataframe = build_fact_mention_nlp_input(
+        _base_fact_mention_dataframe(),
+        _base_fact_article_dataframe(),
+        prepared_at="2026-04-01T12:00:00Z",
+    )
+
+    validate_nlp_input_mentions_match_fact_mentions(
+        nlp_input_dataframe,
+        _base_fact_mention_dataframe(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("nlp_mutator", "fact_mutator", "message"),
+    [
+        (
+            lambda dataframe: dataframe.assign(mention_id="orphan-mention"),
+            lambda dataframe: dataframe,
+            "orphan_count=1 missing_count=1",
+        ),
+        (
+            lambda dataframe: dataframe.iloc[0:0].copy(),
+            lambda dataframe: dataframe,
+            "orphan_count=0 missing_count=1",
+        ),
+    ],
+    ids=["orphan_and_missing", "missing_source_mention"],
+)
+def test_validate_nlp_input_mentions_match_fact_mentions_rejects_open_lineage(
+    nlp_mutator,
+    fact_mutator,
+    message,
+):
+    """Regression: stale NLP inputs must not survive a fact_mention rebuild."""
+    fact_mention_dataframe = fact_mutator(_base_fact_mention_dataframe())
+    nlp_input_dataframe = build_fact_mention_nlp_input(
+        _base_fact_mention_dataframe(),
+        _base_fact_article_dataframe(),
+        prepared_at="2026-04-01T12:00:00Z",
+    )
+
+    with pytest.raises(DataQualityError, match=message):
+        validate_nlp_input_mentions_match_fact_mentions(
+            nlp_mutator(nlp_input_dataframe),
+            fact_mention_dataframe,
+        )
 
 
 @pytest.mark.parametrize(

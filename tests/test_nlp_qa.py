@@ -308,6 +308,8 @@ def test_build_nlp_qa_report_summarizes_phase_outputs(model_bundle_config_factor
         "low_confidence_mentions_at_threshold": 0,
         "classified_share_of_scoreable": 1.0,
     }
+    assert "frame_hypotheses" in report["hypothesis_examples"]
+    assert report["blessed_bundle_comparison"]["status"] == "not_configured"
     assert report["backup_model_agreement"]["status"] == "not_available"
 
 
@@ -336,6 +338,31 @@ def test_build_nlp_qa_report_allows_empty_lexicon_and_low_confidence_frames(
 
     assert report["output_coverage"]["framing"]["mentions_with_primary_frame"] == 0
     assert report["output_coverage"]["stereotype_lexicon"]["stereotype_rows"] == 0
+
+
+def test_build_nlp_qa_report_warns_on_zero_unfavorable_low_tone_coverage(
+    model_bundle_config_factory,
+):
+    """Regression: structurally zero unfavorable tone should be a QA warning."""
+    model_bundle_config = model_bundle_config_factory()
+    summary_dataframe = _nlp_summary_dataframe(model_bundle_config.bundle_version)
+    summary_dataframe.loc[
+        summary_dataframe["nlp_enrichment_status"].eq("scored"),
+        "target_tone_label",
+    ] = "unclassified"
+
+    report = build_nlp_qa_report(
+        _nlp_input_dataframe(),
+        summary_dataframe,
+        _frame_score_dataframe(model_bundle_config.bundle_version),
+        _stereotype_word_counts_dataframe(),
+        model_bundle_config=model_bundle_config,
+    )
+
+    assert any(
+        "under-calibrated NLI for unfavorable polarity" in warning
+        for warning in report["warnings"]
+    )
 
 
 def test_build_nlp_qa_report_computes_backup_agreement_when_available(
@@ -371,11 +398,14 @@ def test_build_nlp_qa_report_computes_backup_agreement_when_available(
         "status": "available",
         "primary_model_bundle_version": primary_model_bundle_config.bundle_version,
         "backup_model_bundle_version": backup_model_bundle_config.bundle_version,
-        "common_mentions": 4,
+        "backup_summary_joined_mentions": 4,
+        "backup_scored_mentions": 2,
         "tone_compared_mentions": 1,
         "tone_agreement_rate": 1.0,
+        "tone_cohens_kappa": 1.0,
         "frame_compared_mentions": 1,
         "frame_agreement_rate": 0.0,
+        "frame_cohens_kappa": 0.0,
     }
     assert any(
         "Backup model frame agreement is below 0.80" in warning
@@ -511,7 +541,9 @@ def test_build_nlp_qa_report_threshold_grid_keeps_report_schema(
         "output_coverage",
         "failure_summary",
         "threshold_sensitivity",
+        "hypothesis_examples",
         "backup_model_agreement",
+        "blessed_bundle_comparison",
         "warnings",
     ]
     assert report["threshold_sensitivity"]["thresholds"] == [0.50, 0.80]

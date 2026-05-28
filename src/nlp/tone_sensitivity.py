@@ -400,6 +400,9 @@ def _build_report_payload(
         "probability_bins_by_gender": _build_probability_bin_records(
             analysis_dataframe
         ),
+        "probability_bins_by_current_label": (
+            _build_probability_bin_by_label_records(analysis_dataframe)
+        ),
     }
     return report
 
@@ -537,6 +540,75 @@ def _build_probability_bin_records(
             _PROBABILITY_BIN_ORDER[str(row["probability_bin"])],
         ),
     )
+
+
+def _build_probability_bin_by_label_records(
+    analysis_dataframe: pd.DataFrame,
+) -> list[dict[str, object]]:
+    """Return top-probability bins by persisted tone label."""
+    binned_dataframe = analysis_dataframe.copy()
+    binned_dataframe["probability_bin"] = binned_dataframe[
+        "target_tone_probability"
+    ].map(_probability_bin_label)
+
+    records: list[dict[str, object]] = []
+    records.extend(
+        _segment_probability_bins_by_label(
+            binned_dataframe,
+            segment_type="overall",
+            segment_value="all",
+        )
+    )
+    for gender in sorted(binned_dataframe["gender"].drop_duplicates()):
+        records.extend(
+            _segment_probability_bins_by_label(
+                binned_dataframe.loc[binned_dataframe["gender"].eq(gender)],
+                segment_type="gender",
+                segment_value=str(gender),
+            )
+        )
+    return sorted(
+        records,
+        key=lambda row: (
+            str(row["segment_type"]),
+            str(row["segment_value"]),
+            str(row["target_tone_label"]),
+            _PROBABILITY_BIN_ORDER[str(row["probability_bin"])],
+        ),
+    )
+
+
+def _segment_probability_bins_by_label(
+    segment_dataframe: pd.DataFrame,
+    *,
+    segment_type: str,
+    segment_value: str,
+) -> list[dict[str, object]]:
+    """Return probability bin counts by current tone label for one segment."""
+    rows: list[dict[str, object]] = []
+    for label in CONTROLLED_TARGET_TONE_LABELS:
+        label_dataframe = segment_dataframe.loc[
+            segment_dataframe["target_tone_label"].eq(label)
+        ]
+        label_mentions = len(label_dataframe)
+        for probability_bin in _PROBABILITY_BIN_ORDER:
+            mention_count = int(
+                label_dataframe["probability_bin"].eq(probability_bin).sum()
+            )
+            rows.append(
+                {
+                    "segment_type": segment_type,
+                    "segment_value": segment_value,
+                    "target_tone_label": label,
+                    "probability_bin": probability_bin,
+                    "mentions": mention_count,
+                    "share_of_label_mentions": _safe_ratio(
+                        mention_count,
+                        label_mentions,
+                    ),
+                }
+            )
+    return rows
 
 
 def _segment_probability_bins(
