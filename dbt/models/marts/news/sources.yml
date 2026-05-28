@@ -7,6 +7,19 @@ sources:
       - name: dim_commune
       - name: fact_article
       - name: fact_mention
+      - name: fact_mention_nlp_input
+        columns:
+          - name: mention_id
+            tests:
+              - not_null
+              - unique
+              - relationships:
+                  arguments:
+                    to: source('silver', 'fact_mention')
+                    field: mention_id
+      - name: fact_mention_nlp_summary
+      - name: fact_mention_frame_score
+      - name: fact_stereotype_word_counts
 
   - name: gold
     schema: gold
