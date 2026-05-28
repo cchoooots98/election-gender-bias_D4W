@@ -6,7 +6,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from src.config.settings import SILVER_DIR
+from src.config.settings import GOLD_DIR, SILVER_DIR
 from src.orchestration.nlp_lexicon_pipeline import run_nlp_lexicon_pipeline
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         help="Optional custom stereotype lexicon JSON path.",
     )
+    parser.add_argument(
+        "--trait-lexicon-path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Optional custom two-tier trait lexicon JSON path.",
+    )
+    parser.add_argument(
+        "--sample-leaders-path",
+        type=Path,
+        default=GOLD_DIR / "sample_leaders.parquet",
+        metavar="PATH",
+        help="Path to gold sample_leaders Parquet.",
+    )
+    parser.add_argument(
+        "--exposure-metrics-path",
+        type=Path,
+        default=GOLD_DIR / "mart_exposure_metrics.parquet",
+        metavar="PATH",
+        help="Path to gold mart_exposure_metrics Parquet.",
+    )
     return parser.parse_args(argv)
 
 
@@ -42,7 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run_nlp_lexicon_pipeline(
             nlp_input_path=args.nlp_input_path,
+            sample_leaders_path=args.sample_leaders_path,
+            exposure_metrics_path=args.exposure_metrics_path,
             lexicon_path=args.lexicon_path,
+            trait_lexicon_path=args.trait_lexicon_path,
         )
     except Exception:
         logger.exception("NLP lexicon pipeline exited with failure")

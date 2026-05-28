@@ -1,0 +1,546 @@
+{
+  "lexicon_version": "trait_terms_v1",
+  "description": "Two-tier French trait lexicon for deterministic political media audit counts. Core terms prioritize precision; exploratory terms increase coverage and must be interpreted as discovery signals.",
+  "terms": [
+    {
+      "term": "programme",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Direct reference to a political platform or policy program."
+    },
+    {
+      "term": "projet",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Direct reference to a public project or campaign proposal."
+    },
+    {
+      "term": "mandat",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Direct reference to elected office work or an electoral term."
+    },
+    {
+      "term": "conseil municipal",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Specific municipal governance institution."
+    },
+    {
+      "term": "budget",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Public finance and policy-management vocabulary."
+    },
+    {
+      "term": "gouvernance",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Governance vocabulary tied to public office."
+    },
+    {
+      "term": "logement",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Municipal policy area."
+    },
+    {
+      "term": "transport",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Municipal policy area."
+    },
+    {
+      "term": "ecole",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Education policy area in municipal coverage."
+    },
+    {
+      "term": "service public",
+      "category": "political_work",
+      "tier": "core",
+      "rationale": "Public-service policy vocabulary."
+    },
+    {
+      "term": "urbanisme",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Municipal planning term; useful but less universal across local races."
+    },
+    {
+      "term": "mobilite",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Policy vocabulary for transportation and local mobility."
+    },
+    {
+      "term": "ecologie",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Policy-area term that can also name party identity."
+    },
+    {
+      "term": "environnement",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Environmental policy vocabulary."
+    },
+    {
+      "term": "impots",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Tax-policy vocabulary in local campaigns."
+    },
+    {
+      "term": "fiscalite",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Tax-policy vocabulary in local campaigns."
+    },
+    {
+      "term": "commerce",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Local economic-policy vocabulary."
+    },
+    {
+      "term": "centre ville",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Frequent municipal policy object in local coverage."
+    },
+    {
+      "term": "quartier",
+      "category": "political_work",
+      "tier": "exploratory",
+      "rationale": "Local policy geography; retained for coverage but not a trait alone."
+    },
+    {
+      "term": "competence",
+      "category": "leadership_competence",
+      "tier": "core",
+      "rationale": "Direct competence attribution."
+    },
+    {
+      "term": "experience",
+      "category": "leadership_competence",
+      "tier": "core",
+      "rationale": "Direct experience attribution."
+    },
+    {
+      "term": "leadership",
+      "category": "leadership_competence",
+      "tier": "core",
+      "rationale": "Direct leadership attribution."
+    },
+    {
+      "term": "gestion",
+      "category": "leadership_competence",
+      "tier": "core",
+      "rationale": "Administrative management vocabulary."
+    },
+    {
+      "term": "bilan",
+      "category": "leadership_competence",
+      "tier": "core",
+      "rationale": "Evaluation of governing record."
+    },
+    {
+      "term": "responsable",
+      "category": "leadership_competence",
+      "tier": "core",
+      "rationale": "Responsibility or leadership role vocabulary."
+    },
+    {
+      "term": "diriger",
+      "category": "leadership_competence",
+      "tier": "core",
+      "rationale": "Verb for leading or directing."
+    },
+    {
+      "term": "manager",
+      "category": "leadership_competence",
+      "tier": "exploratory",
+      "rationale": "Management vocabulary; less frequent in political reporting."
+    },
+    {
+      "term": "piloter",
+      "category": "leadership_competence",
+      "tier": "exploratory",
+      "rationale": "Verb for steering a policy or team."
+    },
+    {
+      "term": "porter",
+      "category": "leadership_competence",
+      "tier": "exploratory",
+      "rationale": "Campaign idiom for carrying a project; context-sensitive."
+    },
+    {
+      "term": "incarner",
+      "category": "leadership_competence",
+      "tier": "exploratory",
+      "rationale": "Leadership representation vocabulary."
+    },
+    {
+      "term": "rassembler",
+      "category": "leadership_competence",
+      "tier": "exploratory",
+      "rationale": "Leadership coalition-building vocabulary."
+    },
+    {
+      "term": "autorite",
+      "category": "leadership_competence",
+      "tier": "exploratory",
+      "rationale": "Authority vocabulary; may be positive or negative by context."
+    },
+    {
+      "term": "ambition",
+      "category": "personality",
+      "tier": "core",
+      "rationale": "Direct personality or motivation attribution."
+    },
+    {
+      "term": "ambitieux",
+      "category": "personality",
+      "tier": "core",
+      "rationale": "Direct personality or motivation attribution."
+    },
+    {
+      "term": "ambitieuse",
+      "category": "personality",
+      "tier": "core",
+      "rationale": "Direct personality or motivation attribution."
+    },
+    {
+      "term": "charisme",
+      "category": "personality",
+      "tier": "core",
+      "rationale": "Direct personality attribution."
+    },
+    {
+      "term": "courage",
+      "category": "personality",
+      "tier": "core",
+      "rationale": "Direct personality or character attribution."
+    },
+    {
+      "term": "temperament",
+      "category": "personality",
+      "tier": "core",
+      "rationale": "Direct personality attribution."
+    },
+    {
+      "term": "dynamique",
+      "category": "personality",
+      "tier": "exploratory",
+      "rationale": "Common personality descriptor; retained as exploratory due to broad usage."
+    },
+    {
+      "term": "determine",
+      "category": "personality",
+      "tier": "exploratory",
+      "rationale": "Determination descriptor; can describe people or actions."
+    },
+    {
+      "term": "determinee",
+      "category": "personality",
+      "tier": "exploratory",
+      "rationale": "Determination descriptor; can describe people or actions."
+    },
+    {
+      "term": "engage",
+      "category": "personality",
+      "tier": "exploratory",
+      "rationale": "Engagement descriptor; common in political coverage."
+    },
+    {
+      "term": "engagee",
+      "category": "personality",
+      "tier": "exploratory",
+      "rationale": "Engagement descriptor; common in political coverage."
+    },
+    {
+      "term": "proche",
+      "category": "personality",
+      "tier": "exploratory",
+      "rationale": "Closeness/accessibility descriptor; context-sensitive."
+    },
+    {
+      "term": "famille",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct family/private-life reference."
+    },
+    {
+      "term": "enfants",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct family/private-life reference."
+    },
+    {
+      "term": "parents",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct family/private-life reference."
+    },
+    {
+      "term": "conjoint",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct spouse/partner reference."
+    },
+    {
+      "term": "conjointe",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct spouse/partner reference."
+    },
+    {
+      "term": "epouse",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct spouse reference."
+    },
+    {
+      "term": "mari",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct spouse reference."
+    },
+    {
+      "term": "vie privee",
+      "category": "family_private_life",
+      "tier": "core",
+      "rationale": "Direct private-life reference."
+    },
+    {
+      "term": "mere",
+      "category": "family_private_life",
+      "tier": "exploratory",
+      "rationale": "Family-role reference; context may be institutional in some cases."
+    },
+    {
+      "term": "pere",
+      "category": "family_private_life",
+      "tier": "exploratory",
+      "rationale": "Family-role reference; context may be institutional in some cases."
+    },
+    {
+      "term": "fille",
+      "category": "family_private_life",
+      "tier": "exploratory",
+      "rationale": "Family-role reference; context-sensitive."
+    },
+    {
+      "term": "fils",
+      "category": "family_private_life",
+      "tier": "exploratory",
+      "rationale": "Family-role reference; context-sensitive."
+    },
+    {
+      "term": "apparence",
+      "category": "appearance_body",
+      "tier": "core",
+      "rationale": "Direct appearance reference."
+    },
+    {
+      "term": "physique",
+      "category": "appearance_body",
+      "tier": "core",
+      "rationale": "Direct physical appearance reference."
+    },
+    {
+      "term": "cheveux",
+      "category": "appearance_body",
+      "tier": "core",
+      "rationale": "Direct body/appearance reference."
+    },
+    {
+      "term": "tenue",
+      "category": "appearance_body",
+      "tier": "core",
+      "rationale": "Direct clothing/appearance reference."
+    },
+    {
+      "term": "robe",
+      "category": "appearance_body",
+      "tier": "core",
+      "rationale": "Direct clothing/appearance reference."
+    },
+    {
+      "term": "sourire",
+      "category": "appearance_body",
+      "tier": "core",
+      "rationale": "Direct appearance/body-presentation reference."
+    },
+    {
+      "term": "age",
+      "category": "appearance_body",
+      "tier": "exploratory",
+      "rationale": "Age reference; useful but may be biographical rather than appearance-focused."
+    },
+    {
+      "term": "elegance",
+      "category": "appearance_body",
+      "tier": "exploratory",
+      "rationale": "Appearance-style descriptor."
+    },
+    {
+      "term": "style vestimentaire",
+      "category": "appearance_body",
+      "tier": "exploratory",
+      "rationale": "Specific clothing-style reference."
+    },
+    {
+      "term": "couple",
+      "category": "romance_relationship",
+      "tier": "core",
+      "rationale": "Direct romantic or partner relationship reference."
+    },
+    {
+      "term": "compagnon",
+      "category": "romance_relationship",
+      "tier": "core",
+      "rationale": "Direct partner reference."
+    },
+    {
+      "term": "compagne",
+      "category": "romance_relationship",
+      "tier": "core",
+      "rationale": "Direct partner reference."
+    },
+    {
+      "term": "relation",
+      "category": "romance_relationship",
+      "tier": "exploratory",
+      "rationale": "Relationship vocabulary; broad and context-sensitive."
+    },
+    {
+      "term": "amour",
+      "category": "romance_relationship",
+      "tier": "exploratory",
+      "rationale": "Romantic vocabulary; expected to be sparse in political news."
+    },
+    {
+      "term": "mariage",
+      "category": "romance_relationship",
+      "tier": "exploratory",
+      "rationale": "Marriage vocabulary; expected to be sparse in political news."
+    },
+    {
+      "term": "plainte",
+      "category": "scandal_conflict",
+      "tier": "core",
+      "rationale": "Direct legal complaint or conflict reference."
+    },
+    {
+      "term": "enquete",
+      "category": "scandal_conflict",
+      "tier": "core",
+      "rationale": "Direct investigation reference."
+    },
+    {
+      "term": "polemique",
+      "category": "scandal_conflict",
+      "tier": "core",
+      "rationale": "Direct controversy reference."
+    },
+    {
+      "term": "scandale",
+      "category": "scandal_conflict",
+      "tier": "core",
+      "rationale": "Direct scandal reference."
+    },
+    {
+      "term": "accusation",
+      "category": "scandal_conflict",
+      "tier": "core",
+      "rationale": "Direct accusation reference."
+    },
+    {
+      "term": "mis en cause",
+      "category": "scandal_conflict",
+      "tier": "core",
+      "rationale": "Direct allegation or implication reference."
+    },
+    {
+      "term": "controverse",
+      "category": "scandal_conflict",
+      "tier": "exploratory",
+      "rationale": "Controversy vocabulary; retained as exploratory due to broad usage."
+    },
+    {
+      "term": "corruption",
+      "category": "scandal_conflict",
+      "tier": "exploratory",
+      "rationale": "Corruption allegation vocabulary."
+    },
+    {
+      "term": "condamne",
+      "category": "scandal_conflict",
+      "tier": "exploratory",
+      "rationale": "Conviction/condemnation vocabulary; context-sensitive."
+    },
+    {
+      "term": "condamnee",
+      "category": "scandal_conflict",
+      "tier": "exploratory",
+      "rationale": "Conviction/condemnation vocabulary; context-sensitive."
+    },
+    {
+      "term": "police",
+      "category": "security_order",
+      "tier": "core",
+      "rationale": "Direct law-enforcement reference."
+    },
+    {
+      "term": "securite",
+      "category": "security_order",
+      "tier": "core",
+      "rationale": "Direct security-policy reference."
+    },
+    {
+      "term": "delinquance",
+      "category": "security_order",
+      "tier": "core",
+      "rationale": "Direct public-order issue."
+    },
+    {
+      "term": "incivilites",
+      "category": "security_order",
+      "tier": "core",
+      "rationale": "Direct public-order issue."
+    },
+    {
+      "term": "ordre public",
+      "category": "security_order",
+      "tier": "core",
+      "rationale": "Direct public-order concept."
+    },
+    {
+      "term": "violence",
+      "category": "security_order",
+      "tier": "core",
+      "rationale": "Direct violence/public-order reference."
+    },
+    {
+      "term": "tranquillite",
+      "category": "security_order",
+      "tier": "exploratory",
+      "rationale": "Local safety vocabulary; broader than direct policing."
+    },
+    {
+      "term": "videosurveillance",
+      "category": "security_order",
+      "tier": "exploratory",
+      "rationale": "Specific local security-policy tool."
+    },
+    {
+      "term": "camera",
+      "category": "security_order",
+      "tier": "exploratory",
+      "rationale": "Security-tool vocabulary; may require context review."
+    }
+  ]
+}
