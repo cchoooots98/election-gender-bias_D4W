@@ -17,6 +17,7 @@ run-nlp-lexicon-pipeline = "src.cli.run_nlp_lexicon_pipeline:main"
 run-nlp-sentiment-pipeline = "src.cli.run_nlp_sentiment_pipeline:main"
 run-nlp-tone-pipeline = "src.cli.run_nlp_tone_pipeline:main"
 run-nlp-framing-pipeline = "src.cli.run_nlp_framing_pipeline:main"
+run-nlp-backup-agreement-pipeline = "src.cli.run_nlp_backup_agreement_pipeline:main"
 run-nlp-tone-sensitivity-pipeline = "src.cli.run_nlp_tone_sensitivity_pipeline:main"
 run-nlp-qa-pipeline = "src.cli.run_nlp_qa_pipeline:main"
 
@@ -55,5 +56,8 @@ known-first-party = ["src"]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
 pythonpath = ["."]
+markers = [
+    "smoke: targeted integration smoke tests for CI",
+]
 
 

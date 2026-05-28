@@ -21,7 +21,7 @@ Primary cohort (36 PDFs, all new)::
         --operator    yyfen `
         --window-start 2025-11-01 `
         --window-end   2026-04-30 `
-        --notes "Primary 36-candidate cohort. 18F+18M matched stratified sample."
+        --notes "Primary 36-candidate cohort. 18F+18M stratified gender-quota sample."
 
 SA — expanded to 48 (12 new PDFs in cohort_sa_48/, 36 shared from cohort_36/)::
 

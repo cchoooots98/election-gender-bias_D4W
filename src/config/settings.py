@@ -12,6 +12,7 @@ configuration in one place and makes the pipeline testable by overriding
 os.environ before importing.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -22,6 +23,79 @@ from dotenv import load_dotenv
 # override=False: real env vars (e.g. CI secrets injected by GitHub Actions)
 # take precedence over the .env file — important for reproducible CI runs.
 load_dotenv(override=False)
+
+
+def _parse_bool_env(value: str | None, *, default: bool = False) -> bool:
+    """Parse a boolean environment flag with production-safe accepted values."""
+    if value is None or not value.strip():
+        return default
+    normalized_value = value.strip().lower()
+    if normalized_value in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized_value in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid boolean environment value: {value!r}")
+
+
+def _parse_optional_path_env(value: str | None) -> Path | None:
+    """Return an optional path from an environment variable."""
+    if value is None or not value.strip():
+        return None
+    return Path(value.strip()).expanduser()
+
+
+def _parse_frame_thresholds_env(
+    raw_value: str | None,
+    *,
+    default_threshold: float,
+) -> dict[str, float]:
+    """Parse per-frame NLI thresholds from JSON configuration.
+
+    Args:
+        raw_value: Optional JSON object mapping frame labels to thresholds.
+        default_threshold: Default threshold used for labels omitted from JSON.
+
+    Returns:
+        Complete frame-label to threshold mapping.
+
+    Raises:
+        ValueError: If JSON is malformed, contains unsupported labels, or has
+            values outside the probability range.
+    """
+    frame_labels = {
+        "politique",
+        "vie_privee",
+        "apparence",
+        "scandale",
+        "personnalite",
+        "securite",
+    }
+    thresholds = {frame_label: float(default_threshold) for frame_label in frame_labels}
+    if raw_value is None or not raw_value.strip():
+        return dict(sorted(thresholds.items()))
+
+    try:
+        parsed_value = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("NLP_FRAME_THRESHOLDS must be a JSON object") from exc
+    if not isinstance(parsed_value, dict):
+        raise ValueError("NLP_FRAME_THRESHOLDS must be a JSON object")
+
+    unsupported_labels = sorted(set(parsed_value) - frame_labels)
+    if unsupported_labels:
+        raise ValueError(
+            "NLP_FRAME_THRESHOLDS contains unsupported frame labels: "
+            + ", ".join(unsupported_labels)
+        )
+
+    for frame_label, threshold in parsed_value.items():
+        threshold_value = float(threshold)
+        if not 0 <= threshold_value <= 1:
+            raise ValueError(
+                f"NLP_FRAME_THRESHOLDS[{frame_label!r}] must be between 0 and 1"
+            )
+        thresholds[frame_label] = threshold_value
+    return dict(sorted(thresholds.items()))
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -43,7 +117,7 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 ANALYSIS_START_DATE: str = os.getenv("ANALYSIS_START_DATE", "2025-11-01")
 ANALYSIS_END_DATE: str = os.getenv("ANALYSIS_END_DATE", "2026-04-30")
 
-# Must be even: the matched-pair analysis requires equal M/F sample sizes.
+# Must be even: the gender-quota analysis requires equal M/F sample sizes.
 # Validation is intentionally deferred to the pipeline entry point, not here,
 # to keep settings.py free of business logic.
 CANDIDATE_SAMPLE_SIZE: int = int(os.getenv("CANDIDATE_SAMPLE_SIZE", "36"))
@@ -133,10 +207,21 @@ NLP_MAX_TOKEN_LENGTH: int = int(os.getenv("NLP_MAX_TOKEN_LENGTH", "512"))
 
 NLP_TONE_THRESHOLD: float = float(os.getenv("NLP_TONE_THRESHOLD", "0.60"))
 NLP_FRAME_THRESHOLD: float = float(os.getenv("NLP_FRAME_THRESHOLD", "0.60"))
+NLP_FRAME_THRESHOLDS: dict[str, float] = _parse_frame_thresholds_env(
+    os.getenv("NLP_FRAME_THRESHOLDS"),
+    default_threshold=NLP_FRAME_THRESHOLD,
+)
 NLP_HYPOTHESIS_TEMPLATE_VERSION: str = os.getenv(
     "NLP_HYPOTHESIS_TEMPLATE_VERSION", "candidate_tone_frame_v2"
 )
 NLP_MODEL_DEVICE: str = os.getenv("NLP_MODEL_DEVICE", "auto")
+NLP_MODEL_CACHE_DIR: Path | None = _parse_optional_path_env(
+    os.getenv("NLP_MODEL_CACHE_DIR")
+)
+BLESSED_NLP_MODEL_BUNDLE_VERSION: str = os.getenv(
+    "BLESSED_NLP_MODEL_BUNDLE_VERSION", ""
+).strip()
+SHOW_QA_SAMPLES: bool = _parse_bool_env(os.getenv("SHOW_QA_SAMPLES"), default=False)
 
 # Phase 0 NLP input contract. Keep this version stable unless the text
 # preparation rules change in a way that would alter hashes or eligibility.
@@ -287,8 +372,8 @@ EXCLUDE_DOM_TOM: bool = bool(int(os.getenv("EXCLUDE_DOM_TOM", "1")))
 # Target: CANDIDATE_SAMPLE_SIZE = 36 = 18F + 18M, distributed across 3 strata.
 # 36 gives meaningful regression degrees of freedom (36 − k covariates) and
 # is the minimum for detecting medium effect sizes at acceptable statistical power.
-# Matched stratified sampling (not simple random) ensures gender balance WITHIN
-# each city-size stratum — preventing the confound of "large-city men vs.
+# Stratified sampling with a gender quota ensures gender balance WITHIN each
+# city-size stratum, preventing the confound of "large-city men vs.
 # small-city women" that simple random sampling would produce.
 SAMPLE_LARGE_TOTAL: int = 6  # 3F + 3M  (large cities ≥ 100k)
 SAMPLE_MEDIUM_TOTAL: int = 12  # 6F + 6M  (medium cities 20k–100k)
@@ -303,9 +388,9 @@ SAMPLE_MIN_REGION_COUNT: int = 6
 # These are transparency diagnostics, not sampling constraints.
 # Overall threshold: warn when one bloc reaches an unusually large share of the
 # full cohort. Stratum threshold: warn when a bloc dominates within a specific
-# city-size bucket, because the matched design is interpreted within strata.
+# city-size bucket, because the quota design is interpreted within strata.
 # Bucket x gender threshold: warn when one bloc dominates the exact subgroup
-# used in matched interpretation (for example medium-city women).
+# used in stratum-level interpretation (for example medium-city women).
 SAMPLE_MAX_SINGLE_BLOC_RATIO: float = float(
     os.getenv("SAMPLE_MAX_SINGLE_BLOC_RATIO", "0.45")
 )

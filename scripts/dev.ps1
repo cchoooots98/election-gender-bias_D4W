@@ -58,8 +58,11 @@ switch ($Command) {
         Write-Host "  run-nlp-sentiment-pipeline"
         Write-Host "  run-nlp-tone-pipeline"
         Write-Host "  run-nlp-framing-pipeline"
+        Write-Host "  run-nlp-backup-agreement-pipeline"
         Write-Host "  run-nlp-tone-sensitivity-pipeline"
         Write-Host "  run-nlp-qa-pipeline"
+        Write-Host "  verify-nlp-lexicon"
+        Write-Host "  verify-dashboard-artifacts"
     }
     "lint" {
         Invoke-ProjectCommand $Python @("-m", "ruff", "check", "src/", "tests/", "scripts/")
@@ -119,11 +122,20 @@ switch ($Command) {
     "run-nlp-framing-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_framing_pipeline")
     }
+    "run-nlp-backup-agreement-pipeline" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_backup_agreement_pipeline")
+    }
     "run-nlp-tone-sensitivity-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_tone_sensitivity_pipeline")
     }
     "run-nlp-qa-pipeline" {
         Invoke-ProjectCommand $Python @("-m", "src.cli.run_nlp_qa_pipeline")
+    }
+    "verify-nlp-lexicon" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.verify_nlp_lexicon")
+    }
+    "verify-dashboard-artifacts" {
+        Invoke-ProjectCommand $Python @("-m", "src.cli.verify_dashboard_artifacts")
     }
     default {
         throw "Unknown command '$Command'. Run '.\scripts\dev.ps1 help' for the supported command list."
