@@ -29,13 +29,7 @@ jobs:
 
       - name: Run smoke integration slice
         run: |
-          python -m pytest \
-            tests/test_transform.py \
-            tests/test_sampling.py \
-            tests/test_news_corpus.py \
-            tests/test_dashboard.py \
-            -k "build_dim_candidate_leader_returns_valid_row or manifest_records_department_concentration_warning or run_news_corpus_etl_builds_24_row_exposure_mart or run_news_corpus_etl_persists_redacted_text_artifacts or build_overview_metrics_aggregates_materialized_artifacts" \
-            -v --tb=short
+          python -m pytest -m smoke -v --tb=short
 
       - name: Import dashboard entrypoint
         run: python -c "import src.dashboard.app"

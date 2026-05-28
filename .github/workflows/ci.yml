@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,6 +35,18 @@ jobs:
 
       - name: Black
         run: python -m black --check src tests scripts
+
+      - name: Documentation freshness guard
+        if: github.event_name == 'pull_request'
+        run: |
+          changed_files="$(git diff --name-only origin/${{ github.base_ref }}...HEAD)"
+          echo "$changed_files"
+          if echo "$changed_files" | grep -Eq '^(src/|dbt/models/|dbt/macros/|Dockerfile|Makefile|requirements)'; then
+            echo "$changed_files" | grep -Eq '^(README\.md|docs/)' || {
+              echo "Source or model changes require a README/docs update."
+              exit 1
+            }
+          fi
 
       - name: Pytest
         run: python -m pytest tests -v --tb=short
