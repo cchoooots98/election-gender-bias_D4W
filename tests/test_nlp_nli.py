@@ -169,6 +169,23 @@ def test_select_target_tone_label_keeps_low_confidence_probability():
     assert probability == pytest.approx(0.40)
 
 
+def test_select_target_tone_label_handles_zero_and_one_thresholds():
+    """Boundary: exact 0 and 1 thresholds should have explicit behavior."""
+    label_at_zero, probability_at_zero = select_target_tone_label(
+        {"favorable": 0.40, "unfavorable": 0.35, "neutral": 0.25},
+        threshold=0.0,
+    )
+    label_at_one, probability_at_one = select_target_tone_label(
+        {"favorable": 0.99, "unfavorable": 0.01, "neutral": 0.0},
+        threshold=1.0,
+    )
+
+    assert label_at_zero == "favorable"
+    assert probability_at_zero == pytest.approx(0.40)
+    assert label_at_one == "unclassified"
+    assert probability_at_one == pytest.approx(0.99)
+
+
 @pytest.mark.parametrize("invalid_threshold", [-0.01, 1.01, float("nan")])
 def test_select_target_tone_label_raises_on_invalid_threshold(invalid_threshold):
     """Error path: thresholds must be finite probabilities."""
@@ -365,19 +382,20 @@ def test_enrich_fact_mention_nlp_summary_preserves_input_order_across_batches(
     assert runner.calls == [["mention-001", "mention-002"], ["mention-003"]]
 
 
-def test_enrich_fact_mention_nlp_summary_rejects_bundle_mismatch(
+def test_enrich_tone_raises_when_summary_bundle_differs_from_current_config(
     model_bundle_config_factory,
 ):
-    """Regression: stale Phase 2 summaries must not be mixed with Phase 3 tone."""
-    model_bundle_config = model_bundle_config_factory()
+    """Regression: Phase 2 bundle drift must fail before Phase 3 inference."""
+    current_config = model_bundle_config_factory()
+    stale_summary = _nlp_summary_dataframe("stale-bundle-v0")
 
-    with pytest.raises(DataQualityError, match="bundle version"):
+    with pytest.raises(DataQualityError, match="bundle version does not match"):
         enrich_fact_mention_nlp_summary_with_tone(
             _nlp_input_dataframe(),
-            _nlp_summary_dataframe("stale-bundle"),
+            stale_summary,
             _sample_leaders_dataframe(),
             tone_runner=ConfigurableToneRunner({"mention-001": _tone_prediction()}),
-            model_bundle_config=model_bundle_config,
+            model_bundle_config=current_config,
         )
 
 
@@ -454,6 +472,42 @@ def test_huggingface_nli_runner_raises_only_when_transformer_scoring_is_requeste
                 )
             ]
         )
+
+
+def test_huggingface_nli_tone_runner_loads_pytorch_bin_weights(
+    fake_transformers_zero_shot,
+    model_bundle_config_factory,
+):
+    """Regression: pinned cmarkea NLI loads .bin weights, not safetensors."""
+    model_bundle_config = model_bundle_config_factory()
+    runner = HuggingFaceNliToneRunner(model_bundle_config)
+
+    predictions = runner.predict_batch(
+        [
+            ToneScoringInput(
+                mention_id="mention-001",
+                input_text="Alice Martin presente son programme local.",
+                candidate_name="Alice Martin",
+            )
+        ]
+    )
+
+    model_kwargs = fake_transformers_zero_shot["model"][0]["kwargs"]
+    tokenizer_kwargs = fake_transformers_zero_shot["tokenizer"][0]["kwargs"]
+    assert len(fake_transformers_zero_shot["model"]) == 1
+    assert (
+        fake_transformers_zero_shot["model"][0]["disable_safetensors_conversion"] == "1"
+    )
+    assert model_kwargs["revision"] == model_bundle_config.nli_model_revision
+    assert model_kwargs["use_safetensors"] is False
+    assert tokenizer_kwargs == {
+        "revision": model_bundle_config.nli_model_revision,
+        "use_fast": False,
+    }
+    assert fake_transformers_zero_shot["pipeline"][0]["task"] == (
+        "zero-shot-classification"
+    )
+    assert predictions[0].probabilities_by_label["favorable"] == pytest.approx(0.90)
 
 
 def test_materialize_fact_mention_nlp_summary_with_tone_writes_parquet_and_duckdb(

@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 import pandas as pd
 
-from src.config.settings import SILVER_DIR, WAREHOUSE_PATH
+from src.config.settings import NLP_MODEL_CACHE_DIR, SILVER_DIR, WAREHOUSE_PATH
 from src.nlp._validation import (
     coerce_utc_timestamp,
     pipeline_device_arg,
@@ -204,14 +204,21 @@ class HuggingFaceSentimentRunner:
             ) from exc
 
         try:
+            cache_kwargs = (
+                {"cache_dir": str(NLP_MODEL_CACHE_DIR)}
+                if NLP_MODEL_CACHE_DIR is not None
+                else {}
+            )
             tokenizer = AutoTokenizer.from_pretrained(
                 self._model_bundle_config.sentiment_model_name,
                 revision=self._model_bundle_config.sentiment_model_revision,
                 use_fast=False,
+                **cache_kwargs,
             )
             model = AutoModelForSequenceClassification.from_pretrained(
                 self._model_bundle_config.sentiment_model_name,
                 revision=self._model_bundle_config.sentiment_model_revision,
+                **cache_kwargs,
             )
             self._analyzer = pipeline(
                 task="text-classification",

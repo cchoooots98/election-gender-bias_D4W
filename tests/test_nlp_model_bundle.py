@@ -28,6 +28,34 @@ def test_model_bundle_version_changes_when_threshold_changes(
     assert base_config.bundle_version != changed_config.bundle_version
 
 
+def test_model_bundle_version_changes_when_frame_threshold_map_changes(
+    model_bundle_config_factory,
+):
+    """Regression: per-frame threshold edits must invalidate the bundle."""
+    base_config = model_bundle_config_factory()
+    changed_config = model_bundle_config_factory(
+        frame_thresholds={
+            "apparence": 0.6,
+            "personnalite": 0.6,
+            "politique": 0.75,
+            "scandale": 0.6,
+            "securite": 0.6,
+            "vie_privee": 0.6,
+        }
+    )
+
+    assert base_config.bundle_version != changed_config.bundle_version
+    assert changed_config.threshold_for_frame("politique") == 0.75
+
+
+def test_model_bundle_rejects_invalid_frame_threshold_map(
+    model_bundle_config_factory,
+):
+    """Error path: unsupported frame labels fail before inference."""
+    with pytest.raises(ValueError, match="unsupported"):
+        model_bundle_config_factory(frame_thresholds={"unknown": 0.6})
+
+
 @pytest.mark.parametrize(
     ("field_name", "bad_value"),
     [

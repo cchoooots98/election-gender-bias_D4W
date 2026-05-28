@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from src.config.settings import (
@@ -19,6 +20,7 @@ from src.config.settings import (
     NLI_MODEL_REVISION,
     NLP_BATCH_SIZE,
     NLP_FRAME_THRESHOLD,
+    NLP_FRAME_THRESHOLDS,
     NLP_HYPOTHESIS_TEMPLATE_VERSION,
     NLP_MAX_TOKEN_LENGTH,
     NLP_MODEL_DEVICE,
@@ -45,6 +47,7 @@ class ModelBundleConfig:
         hypothesis_template_version: Version of the hypothesis text templates.
         tone_threshold: Confidence threshold for target-aware tone.
         frame_threshold: Confidence threshold for frame labels.
+        frame_thresholds: Optional per-frame confidence thresholds.
         max_token_length: Tokenizer maximum sequence length for model inputs.
         batch_size: Inference batch size.
         device: Resolved runtime device metadata.
@@ -62,6 +65,7 @@ class ModelBundleConfig:
     max_token_length: int
     batch_size: int
     device: str
+    frame_thresholds: Mapping[str, float] | None = None
 
     def __post_init__(self) -> None:
         """Validate bundle metadata before deriving a version hash."""
@@ -91,6 +95,11 @@ class ModelBundleConfig:
         )
         _validate_probability_threshold("tone_threshold", self.tone_threshold)
         _validate_probability_threshold("frame_threshold", self.frame_threshold)
+        normalized_frame_thresholds = _normalize_frame_thresholds(
+            self.frame_thresholds,
+            default_threshold=self.frame_threshold,
+        )
+        object.__setattr__(self, "frame_thresholds", normalized_frame_thresholds)
         if self.max_token_length <= 0:
             raise ValueError("max_token_length must be positive")
         if self.batch_size <= 0:
@@ -126,6 +135,10 @@ class ModelBundleConfig:
             "hypothesis_template_version": self.hypothesis_template_version,
             "tone_threshold": float(self.tone_threshold),
             "frame_threshold": float(self.frame_threshold),
+            "frame_thresholds": {
+                frame_label: float(threshold)
+                for frame_label, threshold in sorted(self.frame_thresholds.items())
+            },
             "max_token_length": int(self.max_token_length),
             "batch_size": int(self.batch_size),
             "device": self.device,
@@ -133,6 +146,23 @@ class ModelBundleConfig:
         if include_bundle_version:
             metadata["nlp_model_bundle_version"] = self.bundle_version
         return metadata
+
+    def threshold_for_frame(self, frame_label: str) -> float:
+        """Return the configured threshold for one controlled frame label.
+
+        Args:
+            frame_label: Controlled frame label.
+
+        Returns:
+            Probability threshold for the label.
+
+        Raises:
+            ValueError: If ``frame_label`` is unsupported.
+        """
+        normalized_label = str(frame_label).strip()
+        if normalized_label not in self.frame_thresholds:
+            raise ValueError(f"unsupported frame label: {normalized_label}")
+        return float(self.frame_thresholds[normalized_label])
 
 
 def build_model_bundle_config(
@@ -161,6 +191,7 @@ def build_model_bundle_config(
         hypothesis_template_version=NLP_HYPOTHESIS_TEMPLATE_VERSION,
         tone_threshold=NLP_TONE_THRESHOLD,
         frame_threshold=NLP_FRAME_THRESHOLD,
+        frame_thresholds=NLP_FRAME_THRESHOLDS,
         max_token_length=NLP_MAX_TOKEN_LENGTH,
         batch_size=NLP_BATCH_SIZE,
         device=resolve_model_device(device_policy),
@@ -226,3 +257,36 @@ def _validate_probability_threshold(name: str, value: float) -> None:
     """Raise when a configured threshold is outside the probability range."""
     if not 0 <= float(value) <= 1:
         raise ValueError(f"{name} must be between 0 and 1")
+
+
+def _normalize_frame_thresholds(
+    frame_thresholds: Mapping[str, float] | None,
+    *,
+    default_threshold: float,
+) -> dict[str, float]:
+    """Return a complete validated frame-threshold mapping."""
+    controlled_frame_labels = {
+        "politique",
+        "vie_privee",
+        "apparence",
+        "scandale",
+        "personnalite",
+        "securite",
+    }
+    normalized_thresholds = {
+        frame_label: float(default_threshold) for frame_label in controlled_frame_labels
+    }
+    if frame_thresholds is not None:
+        unsupported_labels = sorted(set(frame_thresholds) - controlled_frame_labels)
+        if unsupported_labels:
+            raise ValueError(
+                "frame_thresholds contains unsupported labels: "
+                + ", ".join(unsupported_labels)
+            )
+        for frame_label, threshold in frame_thresholds.items():
+            _validate_probability_threshold(
+                f"frame_thresholds[{frame_label!r}]",
+                threshold,
+            )
+            normalized_thresholds[str(frame_label)] = float(threshold)
+    return dict(sorted(normalized_thresholds.items()))

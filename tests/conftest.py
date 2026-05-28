@@ -14,6 +14,10 @@ maturity. Hiring managers reading this file will see that tests are isolated,
 reproducible, and don't rely on external state.
 """
 
+import os
+import sys
+from types import ModuleType
+
 import pandas as pd
 import pytest
 
@@ -77,6 +81,78 @@ class ConfigurableFrameRunner:
             self.predictions_by_mention_id[scoring_input.mention_id]
             for scoring_input in scoring_inputs
         ]
+
+
+@pytest.fixture
+def fake_transformers_zero_shot(monkeypatch):
+    """Install a fake Transformers module for hermetic NLI loader tests."""
+    calls: dict[str, list[dict[str, object]]] = {
+        "tokenizer": [],
+        "model": [],
+        "pipeline": [],
+    }
+
+    class FakeTokenizer:
+        """Tokenizer stub that keeps truncation checks in-memory."""
+
+        def __call__(self, *args, **kwargs):
+            return {"input_ids": [1, 2, 3]}
+
+    class FakeAutoTokenizer:
+        """Record tokenizer loading without reaching Hugging Face."""
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            calls["tokenizer"].append({"args": args, "kwargs": kwargs})
+            return FakeTokenizer()
+
+    class FakeAutoModelForSequenceClassification:
+        """Record model loading kwargs without downloading model weights."""
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            calls["model"].append(
+                {
+                    "args": args,
+                    "kwargs": kwargs,
+                    "disable_safetensors_conversion": os.environ.get(
+                        "DISABLE_SAFETENSORS_CONVERSION"
+                    ),
+                }
+            )
+            return object()
+
+    class FakeZeroShotAnalyzer:
+        """Return labels from the request so tone and frame tests share one fake."""
+
+        def __init__(self, tokenizer) -> None:
+            self.tokenizer = tokenizer
+
+        def __call__(self, text, *, candidate_labels, **kwargs):
+            labels = list(candidate_labels)
+            scores = [0.90] + [0.05] * (len(labels) - 1)
+            return {"sequence": text, "labels": labels, "scores": scores}
+
+    def fake_pipeline(*, task, model, tokenizer, device):
+        calls["pipeline"].append(
+            {
+                "task": task,
+                "model": model,
+                "tokenizer": tokenizer,
+                "device": device,
+            }
+        )
+        return FakeZeroShotAnalyzer(tokenizer)
+
+    fake_transformers_module = ModuleType("transformers")
+    fake_transformers_module.AutoTokenizer = FakeAutoTokenizer
+    fake_transformers_module.AutoModelForSequenceClassification = (
+        FakeAutoModelForSequenceClassification
+    )
+    fake_transformers_module.pipeline = fake_pipeline
+
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers_module)
+    return calls
 
 
 @pytest.fixture

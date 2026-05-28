@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Mapping, Sequence
+import os
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
 
-from src.config.settings import SILVER_DIR, WAREHOUSE_PATH
+from src.config.settings import NLP_MODEL_CACHE_DIR, SILVER_DIR, WAREHOUSE_PATH
 from src.nlp._validation import (
     pipeline_device_arg,
     require_columns,
@@ -100,6 +102,12 @@ FACT_MENTION_FRAME_SCORE_COLUMNS: tuple[str, ...] = (
     "nli_hypothesis",
     "nlp_model_bundle_version",
 )
+
+# The pinned cmarkea NLI revision currently publishes PyTorch .bin weights.
+# Explicitly choosing that format and disabling conversion keeps Transformers
+# from opening a background safetensors conversion thread during local inference.
+_DISABLE_SAFETENSORS_CONVERSION_ENV_VAR = "DISABLE_SAFETENSORS_CONVERSION"
+_NLI_USE_SAFETENSORS = False
 
 _REQUIRED_NLP_INPUT_COLUMNS = frozenset(
     {
@@ -267,43 +275,7 @@ class HuggingFaceNliToneRunner:
         if self._analyzer is not None:
             return self._analyzer
 
-        try:
-            from transformers import (
-                AutoModelForSequenceClassification,
-                AutoTokenizer,
-                pipeline,
-            )
-        except ImportError as exc:  # pragma: no cover - depends on environment
-            raise TransformerDependencyError(
-                "transformers is required for NLP NLI tone scoring. Install "
-                "the optional future stack with: pip install -r "
-                "requirements-future.in"
-            ) from exc
-
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                self._model_bundle_config.nli_model_name,
-                revision=self._model_bundle_config.nli_model_revision,
-                use_fast=False,
-            )
-            model = AutoModelForSequenceClassification.from_pretrained(
-                self._model_bundle_config.nli_model_name,
-                revision=self._model_bundle_config.nli_model_revision,
-            )
-            self._analyzer = pipeline(
-                task="zero-shot-classification",
-                model=model,
-                tokenizer=tokenizer,
-                device=pipeline_device_arg(self._model_bundle_config.device),
-            )
-        except Exception as exc:
-            raise NliModelLoadError(
-                "Could not load the Hugging Face NLI model. If the model is "
-                "already cached, retry with HF_HUB_OFFLINE=1. CamemBERT "
-                "tokenizers require the optional SentencePiece dependency; "
-                "install the future NLP stack with: pip install -r "
-                "requirements-future.in"
-            ) from exc
+        self._analyzer = _load_huggingface_zero_shot_analyzer(self._model_bundle_config)
         return self._analyzer
 
     def _was_text_truncated(self, text: str, candidate_name: str) -> bool:
@@ -326,6 +298,73 @@ class HuggingFaceNliToneRunner:
             if len(input_ids) > self._model_bundle_config.max_token_length:
                 return True
         return False
+
+
+def _load_huggingface_zero_shot_analyzer(
+    model_bundle_config: ModelBundleConfig,
+) -> Any:
+    """Load the configured Hugging Face NLI zero-shot pipeline."""
+    try:
+        from transformers import (
+            AutoModelForSequenceClassification,
+            AutoTokenizer,
+            pipeline,
+        )
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        raise TransformerDependencyError(
+            "transformers is required for NLP NLI scoring. Install the "
+            "optional future stack with: pip install -r requirements-future.in"
+        ) from exc
+
+    try:
+        cache_kwargs = (
+            {"cache_dir": str(NLP_MODEL_CACHE_DIR)}
+            if NLP_MODEL_CACHE_DIR is not None
+            else {}
+        )
+        with _disable_safetensors_auto_conversion():
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_bundle_config.nli_model_name,
+                revision=model_bundle_config.nli_model_revision,
+                use_fast=False,
+                **cache_kwargs,
+            )
+            model = AutoModelForSequenceClassification.from_pretrained(
+                model_bundle_config.nli_model_name,
+                revision=model_bundle_config.nli_model_revision,
+                use_safetensors=_NLI_USE_SAFETENSORS,
+                **cache_kwargs,
+            )
+            return pipeline(
+                task="zero-shot-classification",
+                model=model,
+                tokenizer=tokenizer,
+                device=pipeline_device_arg(model_bundle_config.device),
+            )
+    except Exception as exc:
+        raise NliModelLoadError(
+            "Could not load the Hugging Face NLI model. The pinned cmarkea "
+            "NLI revision is loaded from PyTorch .bin weights with "
+            "use_safetensors=False and DISABLE_SAFETENSORS_CONVERSION=1 to "
+            "avoid background safetensors conversion. If the model is already "
+            "cached, retry with HF_HUB_OFFLINE=1. CamemBERT tokenizers require "
+            "the optional SentencePiece dependency; install the future NLP "
+            "stack with: pip install -r requirements-future.in"
+        ) from exc
+
+
+@contextmanager
+def _disable_safetensors_auto_conversion() -> Iterator[None]:
+    """Disable Hugging Face safetensors conversion only during NLI model load."""
+    previous_value = os.environ.get(_DISABLE_SAFETENSORS_CONVERSION_ENV_VAR)
+    os.environ[_DISABLE_SAFETENSORS_CONVERSION_ENV_VAR] = "1"
+    try:
+        yield
+    finally:
+        if previous_value is None:
+            os.environ.pop(_DISABLE_SAFETENSORS_CONVERSION_ENV_VAR, None)
+        else:
+            os.environ[_DISABLE_SAFETENSORS_CONVERSION_ENV_VAR] = previous_value
 
 
 class HuggingFaceNliFrameRunner:
@@ -391,43 +430,7 @@ class HuggingFaceNliFrameRunner:
         if self._analyzer is not None:
             return self._analyzer
 
-        try:
-            from transformers import (
-                AutoModelForSequenceClassification,
-                AutoTokenizer,
-                pipeline,
-            )
-        except ImportError as exc:  # pragma: no cover - depends on environment
-            raise TransformerDependencyError(
-                "transformers is required for NLP framing scoring. Install "
-                "the optional future stack with: pip install -r "
-                "requirements-future.in"
-            ) from exc
-
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                self._model_bundle_config.nli_model_name,
-                revision=self._model_bundle_config.nli_model_revision,
-                use_fast=False,
-            )
-            model = AutoModelForSequenceClassification.from_pretrained(
-                self._model_bundle_config.nli_model_name,
-                revision=self._model_bundle_config.nli_model_revision,
-            )
-            self._analyzer = pipeline(
-                task="zero-shot-classification",
-                model=model,
-                tokenizer=tokenizer,
-                device=pipeline_device_arg(self._model_bundle_config.device),
-            )
-        except Exception as exc:
-            raise NliModelLoadError(
-                "Could not load the Hugging Face NLI model. If the model is "
-                "already cached, retry with HF_HUB_OFFLINE=1. CamemBERT "
-                "tokenizers require the optional SentencePiece dependency; "
-                "install the future NLP stack with: pip install -r "
-                "requirements-future.in"
-            ) from exc
+        self._analyzer = _load_huggingface_zero_shot_analyzer(self._model_bundle_config)
         return self._analyzer
 
     def _was_text_truncated(self, text: str) -> bool:
@@ -528,14 +531,18 @@ def select_target_tone_label(
 def select_primary_frame(
     probabilities_by_label: Mapping[str, float],
     *,
-    threshold: float,
+    threshold: float | None = None,
+    thresholds_by_frame: Mapping[str, float] | None = None,
 ) -> tuple[str, float | None]:
     """Select the persisted primary frame from NLI probabilities.
 
     Args:
         probabilities_by_label: Probability distribution keyed by controlled
             frame labels, excluding ``unclassified``.
-        threshold: Minimum probability required to persist a primary frame.
+        threshold: Minimum probability required to persist a primary frame when
+            the same threshold is used for every frame.
+        thresholds_by_frame: Optional per-frame thresholds. When supplied, the
+            selected top frame is compared with its own threshold.
 
     Returns:
         Tuple of selected frame label and selected probability. Low-confidence
@@ -546,19 +553,50 @@ def select_primary_frame(
         DataQualityError: If labels or probabilities violate the frame contract.
         ValueError: If ``threshold`` is outside ``[0, 1]``.
     """
-    threshold_value = float(threshold)
-    if not math.isfinite(threshold_value) or not 0 <= threshold_value <= 1:
-        raise ValueError("threshold must be between 0 and 1")
-
     probabilities_by_frame = _normalize_frame_probabilities(probabilities_by_label)
+    normalized_thresholds = _normalize_frame_thresholds_for_selection(
+        threshold=threshold,
+        thresholds_by_frame=thresholds_by_frame,
+    )
     top_label = max(
         SCORABLE_FRAME_LABELS,
         key=lambda frame_label: probabilities_by_frame[frame_label],
     )
     top_probability = float(probabilities_by_frame[top_label])
-    if top_probability < threshold_value:
+    if top_probability < normalized_thresholds[top_label]:
         return "unclassified", None
     return top_label, top_probability
+
+
+def _normalize_frame_thresholds_for_selection(
+    *,
+    threshold: float | None,
+    thresholds_by_frame: Mapping[str, float] | None,
+) -> dict[str, float]:
+    """Return a complete threshold mapping for frame selection."""
+    if thresholds_by_frame is None:
+        if threshold is None:
+            raise ValueError("threshold is required when thresholds_by_frame is absent")
+        threshold_value = float(threshold)
+        if not math.isfinite(threshold_value) or not 0 <= threshold_value <= 1:
+            raise ValueError("threshold must be between 0 and 1")
+        return {frame_label: threshold_value for frame_label in SCORABLE_FRAME_LABELS}
+
+    unsupported_labels = sorted(set(thresholds_by_frame) - set(SCORABLE_FRAME_LABELS))
+    missing_labels = sorted(set(SCORABLE_FRAME_LABELS) - set(thresholds_by_frame))
+    if unsupported_labels or missing_labels:
+        raise DataQualityError(
+            "frame thresholds must cover exactly the scorable frame labels; "
+            f"unsupported={unsupported_labels} missing={missing_labels}"
+        )
+
+    normalized_thresholds: dict[str, float] = {}
+    for frame_label in SCORABLE_FRAME_LABELS:
+        threshold_value = float(thresholds_by_frame[frame_label])
+        if not math.isfinite(threshold_value) or not 0 <= threshold_value <= 1:
+            raise ValueError("frame thresholds must be between 0 and 1")
+        normalized_thresholds[frame_label] = threshold_value
+    return normalized_thresholds
 
 
 def enrich_fact_mention_nlp_summary_with_tone(
@@ -1208,7 +1246,7 @@ def _score_frame_rows(
             )
             selected_label, selected_probability = select_primary_frame(
                 probabilities_by_frame,
-                threshold=model_bundle_config.frame_threshold,
+                thresholds_by_frame=model_bundle_config.frame_thresholds,
             )
             update_rows.append(
                 {
@@ -1230,7 +1268,7 @@ def _score_frame_rows(
                         "is_primary_frame": selected_label == frame_label,
                         "passes_threshold": (
                             frame_probability
-                            >= float(model_bundle_config.frame_threshold)
+                            >= model_bundle_config.threshold_for_frame(frame_label)
                         ),
                         "nli_hypothesis": build_frame_hypothesis(frame_label),
                         "nlp_model_bundle_version": (
