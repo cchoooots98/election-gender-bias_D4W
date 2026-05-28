@@ -2,7 +2,7 @@
 
 > Model type: logical table contracts for the current medallion architecture.
 > Physical storage lives in Parquet plus `warehouse/municipal.duckdb`.
-> Last updated: 2026-05-15
+> Last updated: 2026-05-27
 
 ---
 
@@ -17,8 +17,8 @@ The executable repository now materializes the 36-person viable-candidate
 cohort, the Europresse-first news corpus backbone, dbt-owned exposure/summary
 marts, Python-owned regression/bootstrap diagnostics, and the Phase 0 NLP input
 contract builder. Phase 2 generic sentiment, Phase 3 target-aware tone, Phase
-4 frame scoring, and Phase 5 unified NLP QA reporting are implemented. Gold
-NLP activation remains a planned extension.
+4 frame scoring, Phase 5 unified NLP QA reporting, and Phase 6 Gold NLP mart
+activation are implemented.
 
 Active news-analysis window for the implemented corpus slice:
 `2025-11-01` to `2026-04-30`.
@@ -28,8 +28,8 @@ The implemented layers are:
 | Layer | Status | Current contract |
 |---|---|---|
 | Bronze | Implemented | Official raw datasets plus `news_source_record` and local-only `news_web_fetch` artifacts with provenance |
-| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, and quarantine outputs |
-| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, `mart_framing_metrics`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, Python-owned `mart_regression_results`, `mart_bootstrap_ci`, NLP tone threshold QA artifacts, and `data/gold/nlp_qa_report.json` |
+| Silver | Implemented | `dim_commune`, `fact_election_result`, `dim_candidate_leader`, `fact_article_source`, `fact_article`, `fact_mention`, Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts` and `fact_trait_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, and quarantine outputs |
+| Gold | Implemented | `gold.candidate_universe`, `gold.sample_leaders`, `sample_manifest.json`, dbt-owned `mart_exposure_metrics`, Phase 6 NLP-aware `mart_framing_metrics`, `mart_primary_frame_metrics`, `mart_frame_article_drilldown`, `mart_bias_indicators`, `mart_regression_feature_base`, `mart_analysis_summary`, Python-owned trait marts, `mart_regression_results`, `mart_bootstrap_ci`, NLP tone threshold QA artifacts, `data/gold/nlp_backup_summary_sample.parquet`, and `data/gold/nlp_qa_report.json` |
 | Meta | Implemented | `meta.meta_source_snapshot`, `meta.meta_run`, `meta.meta_news_import_batch` |
 
 ---
@@ -68,14 +68,14 @@ same cohort.
 
 ### Sampling design
 
-The project uses a **matched stratified cohort** of 36 electorally viable list
-leaders with city-size quotas `large=6`, `medium=12`, `small=18`, and a 50/50
-gender split inside each stratum.
+The project uses **stratified sampling with a gender quota** for 36
+electorally viable list leaders with city-size quotas `large=6`, `medium=12`,
+`small=18`, and a 50/50 gender split inside each stratum.
 
-This is a design for matched comparison, not equal-precision estimation within
-each city-size bucket. The non-equal allocation reduces metropolitan
-overrepresentation in the eventual media corpus while preserving within-stratum
-gender balance.
+This is a controlled descriptive design, not 1:1 matching or equal-precision
+estimation within each city-size bucket. The non-equal allocation reduces
+metropolitan overrepresentation in the eventual media corpus while preserving
+within-stratum gender balance.
 
 Primary-cohort eligibility is defined from official round-1 results:
 
@@ -344,13 +344,13 @@ Current implemented quarantine outputs include:
 |---|---|---|
 | `canonical_article_id` | VARCHAR | Primary key for the canonical article denominator |
 | `language` | VARCHAR | Article language used by downstream NLP input gating |
-| `has_full_text` | BOOLEAN | Whether the canonical record has usable body text for matching and future NLP |
+| `has_full_text` | BOOLEAN | Whether the canonical record has usable body text for matching and downstream NLP |
 
 ### `silver.fact_mention`
 
 - Grain: one row per canonical article × sampled candidate match
 - Source: `silver.fact_article` matched against `gold.sample_leaders`
-- Role: anchor table for candidate-level coverage, framing, and future NLP outputs
+- Role: anchor table for candidate-level coverage, framing, and NLP outputs
 - Matching contract: full-text articles use title + body + URL evidence.
   Metadata-only articles use title + URL evidence only; the original PDF path or
   candidate-specific PDF filename is never treated as match evidence.
@@ -404,9 +404,8 @@ Current implemented quarantine outputs include:
 - Grain: one row per `mention_id`
 - Source: `silver.fact_mention_nlp_input`
 - Owner: Python modules `src/nlp/sentiment.py` and `src/nlp/nli.py`
-- Status: Phase 2 generic sentiment, Phase 3 target-aware tone, and Phase 4
-  Silver framing are implemented. Gold framing marts still remain a later
-  activation phase.
+- Status: Phase 2 generic sentiment, Phase 3 target-aware tone, Phase 4
+  Silver framing, and Phase 6 Gold mart activation are implemented.
 - Role: compact mention-level NLP output table for model results that do not
   need one row per frame label.
 - Model contract:
@@ -427,9 +426,10 @@ Current implemented quarantine outputs include:
   - Framing uses the same primary NLI model in multi-label mode against the
     controlled frame vocabulary. All scorable frame probabilities are stored in
     `silver.fact_mention_frame_score`.
-  - Low-confidence frame predictions below `NLP_FRAME_THRESHOLD` are persisted
-    as `unclassified` in the summary table. `unclassified` is a fallback state,
-    not a model-scored frame row.
+  - Low-confidence frame predictions below the configured per-frame threshold
+    map (`NLP_FRAME_THRESHOLDS`, defaulting every frame to
+    `NLP_FRAME_THRESHOLD`) are persisted as `unclassified` in the summary
+    table. `unclassified` is a fallback state, not a model-scored frame row.
 - DQ contract:
   - `mention_id` must be unique and must match the current NLP input table.
   - Scored rows require `input_hash`, `generic_sentiment_label`,
@@ -478,7 +478,7 @@ Current implemented quarantine outputs include:
     fallback.
   - `frame_probability` must be between `0` and `1`.
   - At most one frame may have `is_primary_frame = TRUE` per mention.
-  - Primary frames must pass the configured frame threshold.
+  - Primary frames must pass the configured threshold for that frame label.
   - Every row must match a current NLP input mention.
   - `nlp_model_bundle_version` is required on every row.
 
@@ -488,7 +488,7 @@ Current implemented quarantine outputs include:
 | `frame_label` | VARCHAR | Controlled frame label, excluding `unclassified` |
 | `frame_probability` | DOUBLE | Multi-label NLI probability |
 | `is_primary_frame` | BOOLEAN | True for the selected primary frame |
-| `passes_threshold` | BOOLEAN | True when probability meets `NLP_FRAME_THRESHOLD` |
+| `passes_threshold` | BOOLEAN | True when probability meets the configured threshold for that frame label |
 | `nli_hypothesis` | VARCHAR | Exact hypothesis string used for the frame |
 | `nlp_model_bundle_version` | VARCHAR | Deterministic model-bundle hash |
 
@@ -497,8 +497,8 @@ Current implemented quarantine outputs include:
 - Grain: one row per `mention_id` x `lexicon_category` x `term`
 - Source: `silver.fact_mention_nlp_input.input_text`
 - Owner: Python module `src/nlp/lexicon.py`
-- Status: Phase 1 implemented as a deterministic lexicon audit. It does not
-  run Transformer inference and does not activate Gold NLP marts yet.
+- Status: Phase 1 implemented as a deterministic lexicon audit. Phase 6 uses
+  the emitted rows as optional Gold stereotype-rate inputs after dbt activation.
 - Role: deterministic vocabulary audit table for stereotype and framing terms.
 - Text minimization contract:
   - Counts are derived only from Phase 0 mention-level `input_text`.
@@ -521,6 +521,43 @@ Current implemented quarantine outputs include:
 | `count` | INTEGER | Positive match count within the normalized mention context |
 | `count_per_1k_tokens` | DOUBLE | `count / normalized_token_count * 1000` |
 | `lexicon_version` | VARCHAR | Versioned lexicon identifier persisted on every row |
+
+### `silver.fact_trait_word_counts`
+
+- Grain: one row per `mention_id` x `trait_category` x `trait_tier` x `term`
+- Source: `silver.fact_mention_nlp_input.input_text`
+- Owner: Python module `src/nlp/trait_lexicon.py`
+- Status: Phase 1 implemented as a deterministic two-tier trait lexicon audit.
+- Role: explainable vocabulary feature layer for candidate-description traits.
+- Text minimization contract:
+  - Counts are derived only from mention-level `input_text`.
+  - Full article body text is never read by this step.
+  - Output rows persist normalized terms, counts, and English rationale, not
+    full source text.
+- DQ contract:
+  - Only rows with `eligible_for_lexicon = TRUE` are counted.
+  - Zero-count rows are omitted; Gold trait marts reintroduce zero category
+    rows for stable dashboard denominators.
+  - `trait_category` must be one of `political_work`,
+    `leadership_competence`, `personality`, `family_private_life`,
+    `appearance_body`, `romance_relationship`, `scandal_conflict`, or
+    `security_order`.
+  - `trait_tier` must be `core` or `exploratory`.
+  - Unique key is `mention_id`, `trait_category`, `trait_tier`, `term`.
+  - `count` must be positive and `count_per_1k_tokens` must be non-negative.
+
+| Column | Type | Notes |
+|---|---|---|
+| `mention_id` | VARCHAR | Foreign key to `silver.fact_mention_nlp_input` |
+| `leader_id` | VARCHAR | Denormalized sampled leader identifier |
+| `canonical_article_id` | VARCHAR | Denormalized article identifier |
+| `trait_category` | VARCHAR | Controlled trait category |
+| `trait_tier` | VARCHAR | `core` for high precision or `exploratory` for discovery |
+| `term` | VARCHAR | Normalized trait lexicon term that matched the mention context |
+| `count` | INTEGER | Positive match count within the normalized mention context |
+| `count_per_1k_tokens` | DOUBLE | `count / normalized_token_count * 1000` |
+| `lexicon_version` | VARCHAR | Versioned trait lexicon identifier |
+| `rationale` | VARCHAR | English rationale for the term-category placement |
 
 ### `silver.manual_review_candidate_match`
 
@@ -671,18 +708,72 @@ Modeling note:
 - Owner: dbt model `dbt/models/marts/news/mart_framing_metrics.sql`
 
 - Grain: one row per sampled leader × frame label
-- Source: `silver.fact_mention`
-- Role: NLP pending contract. The current baseline stabilizes the table shape
-  with `unclassified` rows only; it does not support framing or dashboard tone
-  conclusions until NLP Silver outputs are promoted into Gold marts.
+- Source: `gold.sample_leaders`, `silver.fact_mention`, and optional
+  `silver.fact_mention_nlp_summary` plus `silver.fact_mention_frame_score`
+- Role: multi-label NLP-aware frame diagnostic mart. When Phase 4 Silver outputs
+  exist, scorable frame labels count threshold-passing mentions and
+  `unclassified` captures skipped, failed, or below-threshold mentions. Because
+  one mention can pass several frame thresholds, `mention_count` can sum above
+  the mention denominator. When NLP Silver outputs do not exist, the mart
+  preserves the pre-NLP unclassified fallback so the news pipeline remains
+  runnable.
+
+### `gold.mart_primary_frame_metrics`
+
+- Owner: dbt model `dbt/models/marts/news/mart_primary_frame_metrics.sql`
+
+- Grain: one row per sampled leader x primary frame label
+- Source: `gold.sample_leaders`, `silver.fact_mention`, and optional
+  `silver.fact_mention_nlp_summary`
+- Role: dashboard-facing primary-frame mart. Each mention contributes to one
+  `primary_frame_label` or `unclassified`, so gender-level counts reconcile to
+  the mention denominator and align with `gold.mart_bias_indicators` frame-share
+  metrics.
+
+### `gold.mart_frame_article_drilldown`
+
+- Owner: dbt model `dbt/models/marts/news/mart_frame_article_drilldown.sql`
+- Grain: one row per sampled leader x primary frame label x canonical article
+- Source: `silver.fact_mention_nlp_summary`, `silver.fact_article`, and
+  `gold.sample_leaders`
+- Role: reviewer drilldown for high-volume frame findings, especially
+  `scandale`. It keeps article titles, dates, outlet names, commune names, and
+  primary-frame probabilities so a reviewer can inspect which events drive a
+  frame signal without exposing full article bodies.
 
 ### `gold.mart_bias_indicators`
 
 - Owner: dbt model `dbt/models/marts/news/mart_bias_indicators.sql`
 
-- Grain: one row per gender × exposure metric
-- Source: `gold.mart_exposure_metrics`
-- Role: quick comparison layer for dashboard-level gender summaries
+- Grain: one row per gender x exposure or NLP audit metric
+- Source: `gold.mart_exposure_metrics` plus optional Silver NLP outputs
+- Role: quick comparison layer for dashboard-level gender summaries. Phase 6
+  adds NLP inference coverage, target-aware unfavorable tone share, policy
+  frame share, scandal frame share, appearance/private-life frame share, and
+  stereotype lexicon count rate while preserving the original exposure metrics.
+
+### `gold.mart_trait_metrics`
+
+- Owner: Python module `src/nlp/trait_lexicon.py`
+- Grain: one row per outlier scenario x trait tier x gender x trait category
+- Source: `silver.fact_mention_nlp_input`, `silver.fact_trait_word_counts`,
+  `gold.sample_leaders`, and `gold.mart_exposure_metrics`
+- Role: dashboard-ready deterministic trait vocabulary metrics.
+- Metric contract:
+  - `hits_per_1k_context_words` is the primary normalized comparison metric.
+  - `coverage_rate` is `hit_mentions / mention_count`.
+  - `evidence_level` is `chart_ready`, `sparse_evidence`, or `table_only`
+    based on category hit coverage.
+  - Scenarios are `all`, `drop_top_overall`, and `drop_top_each_gender`.
+
+Companion Gold artifacts:
+- `gold.mart_trait_top_terms`: ranked matched terms by scenario, tier, gender,
+  and category.
+- `gold.mart_trait_candidate_metrics`: candidate-level trait counts for
+  drilldown.
+- `gold.mart_trait_qa_samples`: representative mention-context snippets for
+  human QA. These snippets come from Phase 0 mention contexts, not full article
+  body text.
 
 ### `gold.mart_regression_feature_base`
 
@@ -699,22 +790,30 @@ Modeling note:
 
 - Grain: one row per analysis, dimension, group label, and metric
 - Owner: dbt model `dbt/models/marts/news/mart_analysis_summary.sql`
-- Source: `gold.mart_exposure_metrics`
+- Source: `gold.mart_exposure_metrics` and `gold.mart_bias_indicators`
 - Role: long-form dashboard summary table so Streamlit displays metric results
   rather than recomputing analytical definitions at render time.
 - Key contract: `analysis_id` is a unique row-level identifier; related rows
   are grouped by `analysis_section_id` (for example `A1` for exposure
   distribution).
+- NLP dashboard summary rows use `analysis_section_id = 'A5'` and are emitted
+  only when Phase 6 NLP bias-indicator metrics are present.
 
 ### `gold.mart_regression_results`
 
 - Grain: one row per model coefficient
 - Owner: Python module `src.metrics.news.regression`
 - Source: `gold.mart_regression_feature_base`
-- Role: persisted Poisson and Negative Binomial exposure-model audit output
+- Role: persisted exposure-model audit output. The primary model is
+  Negative Binomial with `gender_female`, `is_incumbent`, and
+  `offset(log(population))`. Poisson is diagnostic, high-dimensional controls
+  are sensitivity output, and a fixed-seed placebo gender label is a
+  falsification check.
 - Status contract: each row carries a `status` field such as `fitted`,
   `fitted_with_warning:*`, or `fit_failed:*` so statistical warnings remain
   visible in downstream audit artifacts
+- Governance columns: `model_role`, `q_value`, `parameter_count`,
+  `excluded_missing_control_count`, `inference_status`, and `is_publishable`
 
 ### `gold.mart_bootstrap_ci`
 
@@ -730,6 +829,10 @@ Modeling note:
 - Role: lightweight run-level QA artifact for parser mix, language mix,
   rejection rates, candidate coverage, regression status, and web-enrichment
   behavior
+- Governance fields:
+  - `generated_at`: UTC report generation timestamp
+  - `warning_count`: number of non-fatal data-quality warnings
+  - `warnings`: warning objects surfaced by the dashboard and artifact CLI
 - Web-enrichment counters:
   - `web_scrape_queued_count`: candidate URL rows considered for enrichment
   - `web_scrape_cache_hit_count`: queued rows filled from local cache without
@@ -753,10 +856,10 @@ Modeling note:
 - Role: model QA artifact for Phase 3 target-aware tone coverage. It audits
   how the classified share of scoreable rows changes when the probability
   threshold varies.
-- Scope limitation: this artifact does not reconstruct alternate tone-label
-  distributions. The Silver summary persists the final label and top
-  probability, not low-confidence raw top labels or full NLI probability
-  vectors.
+- Scope limitation: the companion report includes top-probability bins by the
+  persisted current label, but it does not reconstruct alternate low-threshold
+  tone-label distributions. The Silver summary persists the final label and
+  top probability, not the full NLI probability vector.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -783,7 +886,8 @@ Modeling note:
   - `silver.fact_stereotype_word_counts`
 - Role: unified model-governance artifact for NLP coverage, failure modes,
   threshold sensitivity, and model provenance. It does not run Transformer
-  inference and does not activate Gold NLP marts.
+  inference. Phase 6 Gold marts consume its coverage and caveat outputs for
+  dashboard interpretation.
 - Storage:
   - `data/gold/nlp_qa_report.json`
 - Observability:
@@ -804,13 +908,29 @@ Top-level JSON fields:
 | `report_schema_version` | Fixed value `nlp_qa_report_v1` |
 | `generated_at` | UTC timestamp for the report |
 | `model_bundle` | Observed NLP bundle version and current local model-bundle metadata |
+| `hypothesis_examples` | Exact tone-template and frame-hypothesis examples shown in the dashboard |
 | `source_tables` | Logical source names, row counts, and expected columns |
 | `input_coverage` | Total mentions, lexicon eligibility, inference eligibility, and skip reasons |
 | `output_coverage` | Sentiment, tone, frame, and stereotype coverage counters |
 | `failure_summary` | Skipped mentions by reason and failed mentions by error type |
 | `threshold_sensitivity` | Tone and framing coverage over the Phase 5 threshold grid |
 | `backup_model_agreement` | Agreement metrics when precomputed backup outputs are supplied; otherwise `not_available` |
+| `blessed_bundle_comparison` | Optional comparison to `BLESSED_NLP_MODEL_BUNDLE_VERSION` |
 | `warnings` | Non-fatal governance caveats that must remain visible to consumers |
+
+### `data/gold/nlp_backup_summary_sample.parquet`
+
+- Grain: one row per NLP mention summary row, with backup predictions populated
+  only for the deterministic governance sample
+- Owner: Python module `src.nlp.backup_agreement`
+- Source: `silver.fact_mention_nlp_input`, `silver.fact_mention_nlp_summary`,
+  and `gold.sample_leaders`
+- Role: optional backup-model agreement input for `nlp_qa_report.json`. The
+  artifact uses the backup NLI model pinned in settings and supports agreement
+  rates plus Cohen's kappa without treating the backup model as ground truth.
+- Default sample contract: up to 100 scoreable mentions, fixed random seed, and
+  full summary-table shape so existing NLP QA comparison logic can join by
+  `mention_id`.
 
 ---
 
@@ -876,6 +996,10 @@ silver.dim_candidate_leader (leader_id PK)
                       |
                       +--< gold.mart_exposure_metrics (leader_id PK)
                       |
+                      +--< gold.mart_framing_metrics (leader_id, frame_label)
+                      |
+                      +--< gold.mart_primary_frame_metrics (leader_id, frame_label)
+                      |
                       +--< gold.mart_regression_feature_base (leader_id PK)
                              |
                              +--< gold.mart_regression_results
@@ -885,6 +1009,10 @@ silver.dim_candidate_leader (leader_id PK)
 silver.fact_article (canonical_article_id PK)
     |
     +--< silver.fact_mention (canonical_article_id FK)
+             |
+             +--< silver.fact_mention_nlp_input (mention_id PK)
+                     |
+                     +--< silver.fact_trait_word_counts (mention_id, trait term)
 
 meta.meta_source_snapshot records Bronze-source fetch lineage
 meta.meta_run records execution lineage across implemented pipelines
@@ -904,4 +1032,4 @@ meta.meta_run records execution lineage across implemented pipelines
 | `meta.meta_run` | Implemented | Keep execution identity distinct from batch identity |
 | News ingest and article pipeline | Implemented | Keep the Europresse parser contract and QA checks stable as new exports are added |
 | dbt Gold mart layer | Implemented | Keep model schema tests aligned with dashboard and regression contracts |
-| NLP fact tables and marts | Partially implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, tone threshold QA, and Phase 5 unified QA artifacts exist; add Gold NLP mart activation next |
+| NLP fact tables and marts | Implemented | Phase 0 `fact_mention_nlp_input`, Phase 1 `fact_stereotype_word_counts` and `fact_trait_word_counts`, Phase 2/3/4 `fact_mention_nlp_summary`, Phase 4 `fact_mention_frame_score`, tone threshold QA, Phase 5 unified QA artifacts, Python-owned trait marts, and Phase 6 dbt Gold NLP activation are implemented |

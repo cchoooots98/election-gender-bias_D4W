@@ -1,6 +1,7 @@
 # Pipeline Architecture - Election Gender Bias D4W
 
 > Full logical data model: [`docs/data-model.md`](data-model.md)
+> Last updated: 2026-05-27
 
 ---
 
@@ -15,8 +16,8 @@ Two architectural horizons coexist in this project:
   regression/bootstrap diagnostics -> Streamlit dashboard
 - **NLP enrichment slices**: Phase 0 input, Phase 1 lexicon audit, Phase 2
   generic sentiment baseline, Phase 3 target-aware tone, Phase 4 Silver frame
-  scoring, and Phase 5 unified QA reporting are implemented; Gold NLP marts
-  and richer analytical activation remain planned
+  scoring, Phase 5 unified QA reporting, and Phase 6 Gold mart/dashboard
+  activation are implemented
 
 This distinction matters for portfolio honesty: the runnable script currently
 delivers the implemented audit slice, not the entire future roadmap.
@@ -54,38 +55,26 @@ flowchart LR
             F1["fact_article_source"]
             F2["fact_article"]
             F3["fact_mention"]
-            F4["fact_mention<br>nlp_input"]
-            F5["fact_stereotype<br>word_counts"]
-            F6["fact_mention<br>nlp_summary"]
-            F7["fact_mention<br>frame_score"]
+            F4["NLP Silver facts<br>input · stereotype/trait lexicons · summary · frame_score"]
         end
     end
 
     subgraph NLP["NLP Pipeline"]
-        N0["Phase 0<br>Mention context input"]
-        N1["Phase 1<br>Stereotype lexicon counts"]
-        N2["Phase 2<br>Sentiment baseline"]
-        N3["Phase 3<br>NLI target-aware tone"]
-        N4["Phase 4<br>NLI frames"]
-        N5["Phase 5<br>QA report"]
-        N0 --> N1
-        N0 --> N2
-        N2 --> N3
-        N0 --> N4
-        N0 & N1 & N2 & N3 & N4 --> N5
+        N0["Phase 0-5<br>context · lexicon · sentiment · tone · frames · QA"]
     end
 
     subgraph GLD["Gold"]
         G0["candidate_universe"]
         G1["sample_leaders ★"]
         G2["dbt: mart_exposure_metrics"]
-        G3["dbt: mart_framing_metrics<br>NLP pending"]
+        G3["dbt: NLP frame marts<br>primary + multi-label"]
         G4["dbt: mart_bias_indicators"]
         G5["dbt: mart_regression_feature_base"]
         G6["dbt: mart_analysis_summary"]
         G7["Python: mart_regression_results"]
         G8["Python: mart_bootstrap_ci"]
         G9["Python: nlp_qa_report.json"]
+        G10["Python: trait lexicon marts"]
     end
 
     A1 --> B1
@@ -101,17 +90,11 @@ flowchart LR
     G1 & F2 --> F3
 
     F3 --> N0 --> F4
-    F4 --> N1 --> F5
-    F4 --> N2 --> F6
-    N2 --> N3 --> F6
-    F4 --> N4 --> F7
-    N4 --> F6
-    N5 --> G9
 
     G1 & F3 --> G2 & G3 & G4 & G5 & G6
-    F5 & F6 & F7 -. "future NLP Gold activation" .-> G3 & G4
+    F4 --> G3 & G4 & G9 & G10
     G5 --> G7 & G8
-    G2 & G3 & G4 & G6 & G7 & G8 --> DASH["Streamlit Dashboard"]
+    G2 & G3 & G4 & G6 & G7 & G8 & G10 --> DASH["Streamlit Dashboard"]
 ```
 
 **Runnable-slice note.** `src/orchestration/sampling_pipeline.py` currently
@@ -119,10 +102,10 @@ stops after materializing `gold.candidate_universe` and `gold.sample_leaders`.
 `src/orchestration/news_corpus_pipeline.py` then runs the Europresse manifest
 through `news_source_record`, `fact_article_source`, `fact_article`,
 `fact_mention`, dbt-owned exposure/summary marts, and Python-owned regression
-diagnostics. Phase 0 NLP input preparation, Phase 1 deterministic lexicon
-counts, Phase 2 generic sentiment baseline, Phase 3 target-aware tone, Phase 4
-Silver frame scoring, and Phase 5 unified QA reporting are implemented as
-separate CLI steps. Gold NLP activation remains a planned extension.
+diagnostics. Phase 0 NLP input preparation, Phase 1 deterministic stereotype
+and two-tier trait lexicon counts, Phase 2 generic sentiment baseline, Phase 3 target-aware tone, Phase 4
+Silver frame scoring, Phase 5 unified QA reporting, and Phase 6 Gold NLP mart
+activation are implemented as separate CLI/dbt steps.
 
 ---
 
@@ -196,18 +179,7 @@ erDiagram
         char    leader_id FK
         varchar context_sentences
         integer context_token_count
-        float   sentiment_score
-        float   prob_negative
-        float   frame_politique
-        float   frame_vie_privee
-        float   frame_apparence
-        float   frame_scandale
-        float   frame_personnalite
-        float   frame_securite
-        float   stereo_apparence
-        float   stereo_famille
-        float   stereo_emotion
-        float   stereo_competence
+        boolean headline_mention_flag
     }
 
     FACT_MENTION_NLP_INPUT {
@@ -227,6 +199,18 @@ erDiagram
     FACT_STEREOTYPE_WORD_COUNTS {
         char    mention_id FK
         varchar lexicon_category
+        varchar term
+        integer count
+        float   count_per_1k_tokens
+        varchar lexicon_version
+    }
+
+    FACT_TRAIT_WORD_COUNTS {
+        char    mention_id FK
+        char    leader_id FK
+        char    canonical_article_id FK
+        varchar trait_category
+        varchar trait_tier
         varchar term
         integer count
         float   count_per_1k_tokens
@@ -265,6 +249,7 @@ erDiagram
     FACT_ARTICLE ||--o| FACT_ARTICLE : "canonical_article_id"
     FACT_MENTION ||--o| FACT_MENTION_NLP_INPUT : "mention_id"
     FACT_MENTION_NLP_INPUT ||--o{ FACT_STEREOTYPE_WORD_COUNTS : "mention_id"
+    FACT_MENTION_NLP_INPUT ||--o{ FACT_TRAIT_WORD_COUNTS : "mention_id"
     FACT_MENTION_NLP_INPUT ||--o| FACT_MENTION_NLP_SUMMARY : "mention_id"
     FACT_MENTION_NLP_INPUT ||--o{ FACT_MENTION_FRAME_SCORE : "mention_id"
 ```

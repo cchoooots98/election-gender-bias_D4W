@@ -1,9 +1,10 @@
 # Metric Dictionary — Election Gender Bias D4W
 
-Canonical definitions for all analytical metrics published in the Gold layer.
+Canonical definitions for analytical metrics published in the Gold layer and
+deterministic dashboard reports derived from those metrics.
 Consumers: Streamlit dashboard, regression audit, portfolio documentation.
 
-Last updated: 2026-05-15
+Last updated: 2026-05-27
 
 ---
 
@@ -74,7 +75,7 @@ Grain: **one row per sampled candidate leader** (36 rows total).
 | **Formula** | `COUNT(DISTINCT canonical_article_id) WHERE fact_article.has_full_text = TRUE` |
 | **Owner** | `dbt/models/marts/news/mart_exposure_metrics.sql` |
 | **Null contract** | Never NULL. |
-| **Interpretation** | Data-completeness signal. Only full-text articles can support future NLP enrichment (sentiment, framing). Metadata-only articles contribute to exposure counts but not to NLP outputs. |
+| **Interpretation** | Data-completeness signal. Only full-text articles can support downstream NLP enrichment (sentiment, framing). Metadata-only articles contribute to exposure counts but not to NLP outputs. |
 
 ### `metadata_only_article_count`
 
@@ -96,20 +97,86 @@ Grain: **one row per sampled candidate leader** (36 rows total).
 | **Null contract** | Never NULL. |
 | **Interpretation** | Provenance audit counter. Retained for source-mix QA; excluded from regression predictors. |
 
+### `supplemental_source_article_count`
+
+| Field | Value |
+|---|---|
+| **Definition** | Articles whose acquisition-method provenance includes supplemental sourcing |
+| **Formula** | `COUNT(DISTINCT canonical_article_id) WHERE acquisition_methods LIKE '%supplemental%'` |
+| **Owner** | `dbt/models/marts/news/mart_exposure_metrics.sql` |
+| **Null contract** | Never NULL. |
+| **Interpretation** | Provenance audit counter for manually supplied or non-primary source records. Retained for source-mix QA; excluded from regression predictors. |
+
 ---
 
 ## Bias Indicators (`gold.mart_bias_indicators`)
 
-Grain: **one row per gender × exposure metric** (compact summary for dashboard).
+Grain: **one row per gender x exposure or NLP audit metric** (compact summary
+for dashboard).
 
-### `mean_value` / `median_value`
+### Exposure Metrics
 
 | Field | Value |
 |---|---|
-| **Definition** | Mean and median of the named `metric_name` across all sampled leaders of this gender |
+| **Definition** | Mean or total of the named exposure `metric_name` across all sampled leaders of this gender |
 | **Formula** | Computed from `gold.mart_exposure_metrics` grouped by gender |
 | **Owner** | `dbt/models/marts/news/mart_bias_indicators.sql` |
 | **Interpretation** | Top-level gender comparison. Because distributions are right-skewed (one large-city incumbent dominates the male corpus), median is often more informative than mean. Interpret alongside stratum-level breakdowns. |
+
+### NLP Audit Metrics
+
+| Metric | Formula | Interpretation |
+|---|---|---|
+| `nlp_inference_coverage_rate` | Mean leader-level share of NLP summary rows with `nlp_enrichment_status = 'scored'` | Coverage denominator that must be read before tone or framing comparisons |
+| `mean_unfavorable_tone_share` | Mean leader-level share of scoreable tone rows labeled `unfavorable` at the 0.60 threshold | Candidate-aware NLI tone diagnostic. A value of `0.0` means no row crossed the threshold; it does not prove negative coverage is absent. |
+| `mean_policy_frame_share` | Mean leader-level share of primary-frame-classified mentions with primary frame `politique`; `unclassified` rows are excluded from this denominator | Policy/governance framing signal |
+| `mean_scandal_frame_share` | Mean leader-level share of primary-frame-classified mentions with primary frame `scandale`; `unclassified` rows are excluded from this denominator | Scandal/conflict framing signal. Compare with volume-weighted primary-frame chart because high-coverage leaders can dominate raw mention counts. |
+| `mean_appearance_private_life_frame_share` | Mean leader-level share of primary-frame-classified mentions with primary frame `apparence` or `vie_privee`; `unclassified` rows are excluded from this denominator | Appearance/private-life framing signal |
+| `generic_sentiment_coverage_rate` | Mean leader-level share of NLP summary rows with non-null generic sentiment label and score | Baseline sentiment coverage diagnostic; generic sentiment is not candidate-aware tone |
+| `mean_generic_sentiment_score` | Mean leader-level generic sentiment score on the `[-1, 1]` expected-star scale | Baseline polarity diagnostic only; do not interpret as gendered treatment without context review |
+| `mean_stereotype_count_per_1k_tokens` | Per-leader average over lexicon-eligible mentions only; non-eligible mentions are excluded from both numerator and denominator | Sparse deterministic lexicon audit feature |
+
+Frame-share metrics currently assign `0.0` to leaders with no
+primary-frame-classified mentions before taking the gender mean. This keeps
+zero-coverage leader rows visible in the dashboard; interpret low means with
+the NLP inference and frame-classification coverage metrics.
+
+---
+
+## Outlier Sensitivity Report (`build_outlier_sensitivity_report`)
+
+Grain: **one row per sensitivity scenario**.
+
+This report is computed at dashboard render time from
+`gold.mart_exposure_metrics`. It is not a persisted Gold table; it is a
+deterministic robustness view over the Gold exposure mart.
+
+| Field | Value |
+|---|---|
+| **Owner** | `src/metrics/news/outlier_sensitivity.py -> build_outlier_sensitivity_report()` |
+| **Source** | `gold.mart_exposure_metrics` |
+| **Primary metric** | `article_count` by `gender` |
+| **Null contract** | Empty exposure input returns an empty report schema. Missing, null, non-numeric, or negative exposure values raise before rendering. |
+| **Interpretation** | Robustness check for high-leverage candidates. The panel asks whether the headline gender gap survives when the top exposure rows are removed, capped, or replaced by medians. |
+
+### Scenarios
+
+| `scenario_id` | Formula | Interpretation |
+|---|---|---|
+| `all` | Mean `article_count` by gender across the full cohort | Headline arithmetic mean; most sensitive to extreme leaders |
+| `drop_top_overall` | Mean after removing the single highest-`article_count` leader across the full cohort | Tests whether one leader drives the entire gender gap |
+| `drop_top_each_gender` | Mean after removing the highest-`article_count` leader within each gender | Symmetric top-tail check that preserves gender comparability |
+| `winsorized_mean` | Mean after capping `article_count` at the cohort p95 threshold | Reduces leverage without deleting observations; one shared cap is used for both genders |
+| `median` | Median `article_count` by gender across the full cohort | Typical-candidate comparison; robust to tail concentration |
+
+### Gender comparison columns
+
+| Column | Definition |
+|---|---|
+| `f_value` / `m_value` | Scenario-specific exposure value for female and male leaders |
+| `female_minus_male` | `f_value - m_value`; positive means the female segment is higher |
+| `female_to_male_ratio` | `f_value / m_value`; NULL/NaN when the male denominator is zero or absent |
+| `f_n` / `m_n` | Number of female and male leaders included after the scenario filter |
 
 ---
 
@@ -121,13 +188,23 @@ Grain: **one row per model × coefficient**.
 
 | Field | Value |
 |---|---|
-| **Definition** | Estimated log-count difference for female vs. male candidates, holding city-size bucket, region fixed effects, political bloc, incumbent status, and election outcome constant |
-| **Models** | `poisson_exposure` and `negbinom_exposure` |
-| **Formula** | Poisson / Negative Binomial GLM: `log(article_count) = β₀ + β₁·gender_female + Σβᵢ·Xᵢ + log(population)` |
+| **Definition** | Estimated log-count difference for female vs. male candidates under the model's documented control set |
+| **Models** | `negbinom_exposure` is the primary model; `poisson_exposure` is overdispersion diagnostic; `negbinom_exposure_full_controls` is sensitivity; `negbinom_exposure_placebo` is falsification |
+| **Formula** | Primary Negative Binomial GLM: `log(E[article_count]) = beta_0 + beta_1 * gender_female + beta_2 * is_incumbent + offset(log(population))` |
 | **Owner** | `src/metrics/news/regression.py → build_mart_regression_results()` |
-| **Current estimate** | +0.229 (SE = 0.078, p = 0.003) under Poisson — IRR ≈ 1.26 |
-| **Interpretation** | A positive coefficient means female candidacy is associated with more articles after controlling for listed covariates. **Read as a directional audit signal, not a causal claim.** n = 36; results are sensitive to individual high-leverage candidates. |
+| **Interpretation** | Population is an exposure offset, so its coefficient is fixed at 1.0 rather than estimated as a covariate. The primary model is intentionally low-dimensional for n = 36. City-size bucket, political bloc, election outcome, and region fixed effects are sensitivity or appendix controls, not the headline model. **Read as an audit signal, not a causal claim.** Results are sensitive to individual high-leverage candidates. |
 | **Null contract** | `coefficient` is NULL when `status` starts with `fit_failed:` or `not_fitted_*`. |
+
+### Governance columns
+
+| Column | Definition |
+|---|---|
+| `model_role` | `primary`, `diagnostic`, `sensitivity`, or `placebo`; dashboards should privilege `primary` and label the others explicitly |
+| `q_value` | Benjamini-Hochberg false-discovery-rate adjusted value computed from fitted p-values in the persisted result set; dashboard tables display values below `0.001` in scientific notation |
+| `parameter_count` | Number of parameters estimated for the row's model; this makes high-dimensional sensitivity models visibly different from the primary model |
+| `excluded_missing_control_count` | Number of rows excluded before fitting because a required primary control, currently `is_incumbent`, was unknown |
+| `inference_status` | Machine-readable governance status such as `inconclusive`, `publishable_signal`, `diagnostic_only`, `placebo_check`, or `not_fitted` |
+| `is_publishable` | Boolean flag for coefficient rows with a publishable adjusted signal; diagnostic, placebo, intercept, and inconclusive rows are `false` |
 
 ### `status`
 
@@ -160,7 +237,7 @@ Grain: **one row per regression variable** (n=2,000 bootstrap resamples, fixed s
 | Field | Value |
 |---|---|
 | **Definition** | Number of the 2,000 bootstrap resamples that produced a numerically stable fit |
-| **Interpretation** | A convergence rate below ~90% (`n_converged < 1800`) signals numerical instability — treat the CI with additional caution. Causes include sparse region dummies or near-multicollinear predictors. |
+| **Interpretation** | A convergence rate below ~90% (`n_converged < 1800`) signals numerical instability; treat the CI with additional caution. Causes include sparse controls, high-leverage candidates, or near-multicollinear predictors. |
 
 ---
 
@@ -169,12 +246,14 @@ Grain: **one row per regression variable** (n=2,000 bootstrap resamples, fixed s
 Grain: **one row per analysis × dimension × group label × metric name**.
 
 This is a long-format summary table that the Streamlit dashboard reads directly.
-It aggregates results from `mart_exposure_metrics` into labeled sections.
+It aggregates results from `mart_exposure_metrics` and NLP rows from
+`mart_bias_indicators` into labeled sections.
 
 ### `analysis_section_id`
 
 Grouping key used by the dashboard to display related metrics together.
-Example sections: `A1` (exposure distribution), `A2` (stratum breakdown).
+Example sections: `A1` (exposure distribution), `A2` (stratum breakdown), and
+`A5` (NLP audit signals).
 
 ### `metric_value`
 
@@ -182,6 +261,56 @@ The computed scalar value for this row. Units depend on `metric_name`:
 - `mean_article_count`: articles per leader
 - `exposure_per_10k_mean`: articles per 10,000 residents per leader
 - `source_diversity_mean`: distinct outlets per leader
+
+---
+
+## Gold Framing Metrics (`gold.mart_framing_metrics`)
+
+Grain: **one row per sampled leader x frame label**.
+
+### `mention_count`
+
+| Field | Value |
+|---|---|
+| **Definition** | Distinct mention count assigned to the leader and frame label |
+| **Formula** | For scorable labels, `COUNT(DISTINCT mention_id)` where `silver.fact_mention_frame_score.passes_threshold = TRUE`; for `unclassified`, skipped, failed, or below-threshold summary rows |
+| **Owner** | `dbt/models/marts/news/mart_framing_metrics.sql` |
+| **Null contract** | Never NULL. Leaders with no matching mentions produce `0`. |
+| **Interpretation** | Multi-label frame diagnostic. One mention can pass multiple frame thresholds, so counts can sum above the mention denominator. The dashboard uses `gold.mart_primary_frame_metrics` for the main gender comparison. When NLP Silver outputs are unavailable, all mentions remain in the unclassified fallback. |
+
+### `mean_frame_score`
+
+| Field | Value |
+|---|---|
+| **Definition** | Mean frame probability for the leader and frame label |
+| **Formula** | `AVG(frame_probability)` from `silver.fact_mention_frame_score`; `0.0` for `unclassified` fallback rows |
+| **Owner** | `dbt/models/marts/news/mart_framing_metrics.sql` |
+| **Interpretation** | Probability audit companion to `mention_count`; it is not a calibrated prevalence estimate. |
+
+---
+
+## Primary Frame Metrics (`gold.mart_primary_frame_metrics`)
+
+Grain: **one row per sampled leader x primary frame label**.
+
+### `mention_count`
+
+| Field | Value |
+|---|---|
+| **Definition** | Distinct mention count assigned to the selected `primary_frame_label`, or `unclassified` when no primary frame is available |
+| **Formula** | `COUNT(DISTINCT mention_id)` grouped by `silver.fact_mention_nlp_summary.primary_frame_label`, with blank or NULL labels mapped to `unclassified` |
+| **Owner** | `dbt/models/marts/news/mart_primary_frame_metrics.sql` |
+| **Null contract** | Never NULL. The mart contains one row for every sampled leader x seven frame labels. |
+| **Interpretation** | Main dashboard frame distribution. Each mention contributes to at most one frame, so totals reconcile with the mention denominator and with frame-share metrics in `gold.mart_bias_indicators`. |
+
+### `mean_primary_frame_score`
+
+| Field | Value |
+|---|---|
+| **Definition** | Mean primary-frame probability for the leader and frame label |
+| **Formula** | `AVG(primary_frame_probability)` from `silver.fact_mention_nlp_summary`; `0.0` for `unclassified` fallback rows |
+| **Owner** | `dbt/models/marts/news/mart_primary_frame_metrics.sql` |
+| **Interpretation** | Probability companion for the primary frame. It is a model-score diagnostic, not an adjudicated prevalence estimate. |
 
 ---
 
@@ -218,7 +347,7 @@ signals, not final bias metrics.
 | **Accepted values** | `empty_context`, `too_short_for_lexicon`, `too_short_for_inference`, `language_not_french` |
 | **Owner** | `src/nlp/input_contracts.py` |
 | **Null contract** | NULL only when `eligible_for_inference = TRUE`. |
-| **Interpretation** | QA denominator for future NLP coverage reporting by gender, stratum, and source mix. |
+| **Interpretation** | QA denominator for NLP coverage reporting by gender, stratum, and source mix. |
 
 ---
 
@@ -254,11 +383,77 @@ claims about media bias.
 
 ---
 
+## Trait Lexicon Counts (`silver.fact_trait_word_counts`)
+
+Grain: **one row per mention x trait category x tier x term**.
+
+This table is a deterministic, two-tier trait audit over
+`silver.fact_mention_nlp_input.input_text`. It does not read or persist full
+article body text.
+
+### `trait_category`
+
+| Field | Value |
+|---|---|
+| **Definition** | Controlled category for a matched candidate-description trait |
+| **Accepted values** | `political_work`, `leadership_competence`, `personality`, `family_private_life`, `appearance_body`, `romance_relationship`, `scandal_conflict`, `security_order` |
+| **Owner** | `src/nlp/trait_lexicon.py` |
+| **Interpretation** | Explains which kind of candidate description the matched term represents. Categories are project-specific because general French resources such as FEEL, Lexique, and LIWC do not directly encode this political gender-bias taxonomy. |
+
+### `trait_tier`
+
+| Field | Value |
+|---|---|
+| **Definition** | Precision/coverage tier for the matched term |
+| **Accepted values** | `core`, `exploratory` |
+| **Interpretation** | `core` terms prioritize precision and support main dashboard interpretation. `exploratory` terms increase coverage and are discovery signals that require context review before strong claims. |
+
+### `count` / `count_per_1k_tokens`
+
+| Field | Value |
+|---|---|
+| **Definition** | Exact normalized term or phrase count, plus a per-1,000-token rate within the mention context |
+| **Formula** | Sliding-window exact match over `tokenize_lexicon_text(input_text)`; rate = `count / normalized_token_count * 1000` |
+| **Null contract** | Never NULL for emitted rows. Zero-count rows are omitted. |
+| **Interpretation** | Reproducible trait vocabulary signal. It is not a complete semantic classifier and should be read alongside NLI frame outputs and QA samples. |
+
+---
+
+## Trait Metrics (`gold.mart_trait_metrics`)
+
+Grain: **one row per scenario x trait tier x gender x trait category**.
+
+### Core metrics
+
+| Metric | Formula | Interpretation |
+|---|---|---|
+| `mention_count` | Count of mention contexts in the segment after scenario exclusions | Denominator for coverage |
+| `hit_mentions` | Distinct mentions with at least one matched trait term | Coverage numerator |
+| `term_hits` | Sum of matched trait term counts | Raw vocabulary volume |
+| `hits_per_1k_context_words` | `term_hits / context_word_count * 1000` | Primary normalized comparison metric |
+| `coverage_rate` | `hit_mentions / mention_count` | Share of mentions containing at least one term in the category |
+| `evidence_level` | `chart_ready` when `hit_mentions >= 30`; `sparse_evidence` when `10 <= hit_mentions < 30`; `table_only` when `< 10` | Dashboard guardrail against overinterpreting sparse categories |
+
+### Scenarios
+
+| Scenario | Definition |
+|---|---|
+| `all` | Full sampled cohort |
+| `drop_top_overall` | Removes the leader with the largest `article_count` |
+| `drop_top_each_gender` | Removes the largest-exposure male leader and largest-exposure female leader |
+
+Companion Gold artifacts:
+- `gold.mart_trait_top_terms`: ranked terms by scenario, tier, gender, and category.
+- `gold.mart_trait_candidate_metrics`: candidate-level trait counts for drilldown.
+- `gold.mart_trait_qa_samples`: representative mention-context excerpts for human QA.
+
+---
+
 ## NLP Sentiment and Tone Metrics (`silver.fact_mention_nlp_summary`)
 
 Grain: **one row per article x candidate mention**. These are Phase 2 generic
-sentiment diagnostics plus Phase 3 target-aware tone audit signals. They do
-not activate dashboard-level NLP conclusions until Gold marts consume them.
+sentiment diagnostics plus Phase 3 target-aware tone audit signals. Phase 6
+Gold marts consume these outputs as descriptive dashboard audit signals.
 
 Model methodology source: `cmarkea/distilcamembert-base-sentiment`, documented
 as a French 1-5 star sentiment model trained on Amazon Reviews and Allocine:
@@ -296,7 +491,7 @@ https://huggingface.co/cmarkea/distilcamembert-base-nli
 | **Accepted values** | `favorable`, `unfavorable`, `neutral`, `unclassified` |
 | **Owner** | `src/nlp/nli.py` |
 | **Null contract** | Never NULL. Skipped, failed, or low-confidence rows use `unclassified`. |
-| **Interpretation** | Target-aware political tone audit signal. This is more appropriate than generic sentiment for candidate coverage because the hypothesis explicitly names the candidate. It remains a Silver model output until Gold marts and dashboard panels are activated. |
+| **Interpretation** | Target-aware political tone audit signal. This is more appropriate than generic sentiment for candidate coverage because the hypothesis explicitly names the candidate. Gold marts aggregate it only with explicit coverage denominators and caveats. |
 
 ### `target_tone_probability`
 
@@ -323,7 +518,7 @@ https://huggingface.co/cmarkea/distilcamembert-base-nli
 | Field | Value |
 |---|---|
 | **Definition** | Probability for the selected primary frame |
-| **Formula** | Highest NLI probability across scorable frame labels when that probability is at least `NLP_FRAME_THRESHOLD` |
+| **Formula** | Highest NLI probability across scorable frame labels when that probability meets the configured threshold for that frame: `NLP_FRAME_THRESHOLDS[frame_label]`, defaulting to `NLP_FRAME_THRESHOLD` |
 | **Owner** | `src/nlp/nli.py` |
 | **Null contract** | NULL for `unclassified`, skipped, or failed rows. |
 | **Interpretation** | Confidence field for the summary primary frame. A NULL value means no frame passed the configured threshold, not that the mention has no topic. |
@@ -345,7 +540,7 @@ https://huggingface.co/cmarkea/distilcamembert-base-nli
 | **Definition** | Deterministic short hash of model names, immutable Hugging Face commit revisions, thresholds, runtime dimensions, and hypothesis template version |
 | **Owner** | `src/nlp/model_bundle.py` |
 | **Null contract** | Never NULL. |
-| **Interpretation** | Model provenance identifier. A changed bundle version means sentiment outputs were produced under different runtime metadata and should not be mixed without audit. Mutable revisions such as `main`, `master`, or `latest` are rejected by the model-bundle contract. |
+| **Interpretation** | Model provenance identifier. A changed bundle version means NLP outputs were produced under different runtime metadata and should not be mixed without audit. The bundle includes per-frame thresholds, local runtime dimensions, immutable Hugging Face revisions, and hypothesis-template version. Mutable revisions such as `main`, `master`, or `latest` are rejected by the model-bundle contract. |
 
 ---
 
@@ -384,7 +579,7 @@ https://huggingface.co/cmarkea/distilcamembert-base-nli
 
 | Field | Value |
 |---|---|
-| **Definition** | Boolean flag for the highest-probability frame that passed `NLP_FRAME_THRESHOLD` |
+| **Definition** | Boolean flag for the highest-probability frame that passed that label's configured threshold |
 | **Formula** | `TRUE` for the selected primary frame, otherwise `FALSE`; at most one row per mention may be `TRUE` |
 | **Owner** | `src/nlp/nli.py` |
 | **Null contract** | Never NULL. |
@@ -394,7 +589,7 @@ https://huggingface.co/cmarkea/distilcamembert-base-nli
 
 | Field | Value |
 |---|---|
-| **Definition** | Whether `frame_probability >= NLP_FRAME_THRESHOLD` |
+| **Definition** | Whether `frame_probability >= NLP_FRAME_THRESHOLDS[frame_label]`, falling back to `NLP_FRAME_THRESHOLD` when no per-label override is configured |
 | **Owner** | `src/nlp/nli.py` |
 | **Null contract** | Never NULL. |
 | **Interpretation** | Threshold audit flag. It should not be treated as a mutually exclusive classification because the framing scorer runs in multi-label mode. |
@@ -463,7 +658,7 @@ Grain: **one JSON report per Phase 5 QA run**.
 
 This is a model-governance artifact, not a dashboard metric. It summarizes
 coverage, failures, threshold sensitivity, and model provenance across Phase
-0-4 NLP outputs before Gold NLP marts are activated.
+0-4 NLP outputs for Gold NLP mart and dashboard interpretation.
 
 In Phase 5, `scoreable` means a mention has persisted model output for the
 audited task. It is distinct from the Phase 0 `eligible_for_inference` gate,
@@ -495,7 +690,7 @@ which counts rows allowed to call Transformer models.
 | **Formula** | `classified_mentions / scoreable_mentions` from `silver.fact_mention_nlp_summary` |
 | **Owner** | `src/nlp/qa.py` |
 | **Null contract** | NULL only when no rows have `target_tone_probability`. |
-| **Interpretation** | Operational model-coverage signal. Low coverage indicates that the configured threshold is conservative or inputs are weak. |
+| **Interpretation** | Operational model-coverage signal, not model confidence. Low coverage means many scoreable mention contexts do not exceed the configured probability threshold. |
 
 ### `output_coverage.framing.primary_frame_share_of_frame_scored`
 
@@ -505,7 +700,7 @@ which counts rows allowed to call Transformer models.
 | **Formula** | `mentions_with_primary_frame / frame_scored_mentions` |
 | **Owner** | `src/nlp/qa.py` |
 | **Null contract** | NULL only when no frame-score rows exist. |
-| **Interpretation** | Frame acceptance coverage at the current `NLP_FRAME_THRESHOLD`. This is QA, not a bias conclusion. |
+| **Interpretation** | Frame acceptance coverage at the current per-frame threshold policy. This is QA, not a bias conclusion. |
 
 ### `threshold_sensitivity`
 
@@ -524,6 +719,54 @@ which counts rows allowed to call Transformer models.
 | **Owner** | `src/nlp/qa.py` |
 | **Interpretation** | `not_available` is the default for Phase 5 Core QA. The pipeline does not run backup inference; it only compares precomputed backup summaries when explicitly provided. |
 
+### `backup_model_agreement.backup_scored_mentions`
+
+| Field | Value |
+|---|---|
+| **Definition** | Number of mention contexts actually scored by the backup NLI model |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Governance sample size for backup-model review. This is the count to read before agreement rates. |
+
+### `backup_model_agreement.backup_summary_joined_mentions`
+
+| Field | Value |
+|---|---|
+| **Definition** | Number of rows joining the full primary summary and backup-shaped summary artifacts |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Lineage diagnostic only. It is not the denominator for agreement rates; use `tone_compared_mentions` and `frame_compared_mentions` for the actual comparison denominators. |
+
+### `hypothesis_examples`
+
+| Field | Value |
+|---|---|
+| **Definition** | Exact example NLI hypothesis strings for target-aware tone and every controlled frame label |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Governance field for model-input auditability. Reviewers can inspect what the NLI model was asked to judge without opening Silver frame-score rows. |
+
+### `backup_model_agreement.tone_cohens_kappa`
+
+| Field | Value |
+|---|---|
+| **Definition** | Cohen's kappa between the primary NLI model and the backup NLI model on the deterministic backup sample for target-aware tone |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Agreement diagnostic only. The backup model is not ground truth; low kappa signals model-family sensitivity that requires review before publication. |
+
+### `backup_model_agreement.frame_cohens_kappa`
+
+| Field | Value |
+|---|---|
+| **Definition** | Cohen's kappa between the primary NLI model and the backup NLI model on the deterministic backup sample for primary frame labels |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Agreement diagnostic only. It should be read with agreement rates and the frame-specific hypothesis examples. |
+
+### `blessed_bundle_comparison`
+
+| Field | Value |
+|---|---|
+| **Definition** | Optional comparison between the observed NLP bundle and `BLESSED_NLP_MODEL_BUNDLE_VERSION` |
+| **Owner** | `src/nlp/qa.py` |
+| **Interpretation** | Deployment governance field. When a blessed bundle is configured and does not match the observed run bundle, dashboards and CLI artifact checks surface a warning. |
+
 ---
 
 ## Metric Freshness and SLA
@@ -539,7 +782,7 @@ which counts rows allowed to call Transformer models.
 | Silver (NLP framing) | `make run-nlp-framing-pipeline` is run | Requires current NLP summary rows and optional Transformer dependencies |
 | Gold NLP tone sensitivity QA | `make run-nlp-tone-sensitivity-pipeline` is run | Must read a tone-enriched Phase 3 summary; does not load Transformer models |
 | Gold unified NLP QA | `make run-nlp-qa-pipeline` is run | Must read Phase 0-4 NLP artifacts; does not load Transformer models |
-| Gold dbt marts | Embedded in `make run-news-corpus-pipeline` via `dbt run` | Must pass all 37 schema tests before the pipeline exits |
+| Gold dbt marts | Embedded in `make run-news-corpus-pipeline` via `dbt run`; rerun after NLP pipelines for Phase 6 activation | Must pass dbt schema tests before the pipeline exits |
 | Gold regression | Embedded in news corpus pipeline | Recomputed on each run; `status` column records whether fit succeeded |
 | Dashboard | On Streamlit startup — reads Gold Parquet files | Reflects the last complete pipeline run |
 

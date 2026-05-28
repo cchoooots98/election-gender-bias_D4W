@@ -117,6 +117,10 @@ def test_gender_balance_and_stratum_quotas(tmp_path):
 
     assert (sample_df["gender"] == "F").sum() == TARGET_PER_GENDER
     assert (sample_df["gender"] == "M").sum() == TARGET_PER_GENDER
+    assert sample_df["gender"].value_counts().to_dict() == {
+        "F": TARGET_PER_GENDER,
+        "M": TARGET_PER_GENDER,
+    }
 
     quota_series = sample_df.groupby(["city_size_bucket", "gender"]).size().sort_index()
     assert quota_series[("large", "F")] == LARGE_PER_GENDER
@@ -801,7 +805,7 @@ def test_political_bloc_warning_emitted_above_threshold(tmp_path, caplog):
 def test_political_bloc_warning_emitted_for_stratum_concentration(tmp_path, caplog):
     """Regression: a stratum-level political concentration should emit a warning.
 
-    The matched cohort is interpreted within city-size strata, so bloc
+    The stratified quota cohort is interpreted within city-size strata, so bloc
     concentration must be checked both overall and inside each stratum. This
     test keeps the overall sample diversified while forcing the large stratum
     to be 100% gauche.
@@ -879,12 +883,13 @@ def test_manifest_records_bucket_gender_political_warning(tmp_path):
         for row in subgroup_rows
         if row["scope"] == "city_size_bucket_gender:medium:F"
     ]
-    assert matching_rows
+    assert len(matching_rows) > 0
     assert (
         matching_rows[0]["top_share"] >= SAMPLE_MAX_SINGLE_BLOC_RATIO_PER_BUCKET_GENDER
     )
 
 
+@pytest.mark.smoke
 def test_manifest_records_department_concentration_warning(tmp_path):
     """Regression: manifest must surface department clustering inside one region."""
     leader_df, commune_df = build_candidate_and_commune_frames(
@@ -928,7 +933,7 @@ def test_manifest_records_department_concentration_warning(tmp_path):
     matching_rows = [
         row for row in geography["departments_by_region"] if row["scope"] == "region:32"
     ]
-    assert matching_rows
+    assert len(matching_rows) > 0
     assert (
         matching_rows[0]["top_share"] >= SAMPLE_MAX_SINGLE_DEPARTMENT_RATIO_PER_REGION
     )

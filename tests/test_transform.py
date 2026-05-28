@@ -298,6 +298,7 @@ def test_same_name_candidate_count_ignores_blank_non_candidate_rows():
     assert pd.isna(result_df.loc[2, "same_name_candidate_count"])
 
 
+@pytest.mark.smoke
 def test_build_dim_candidate_leader_returns_valid_row(tmp_path):
     """Happy path: build_dim_candidate_leader should emit a clean one-row dimension."""
     bronze_dir, silver_dir, duckdb_path = _write_dim_candidate_inputs(

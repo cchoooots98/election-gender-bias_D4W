@@ -1,7 +1,13 @@
 # Runbook — Election Gender Bias D4W
 
+> Last updated: 2026-05-27
+
 Operational reference for running, monitoring, and recovering the pipeline.
 Audience: anyone with repository access who needs to reproduce or debug a run.
+
+Command convention: examples use `make <target>` for macOS, Linux, and Git Bash.
+On Windows PowerShell, run the same target with `.\scripts\dev.ps1 <target>`.
+Both entry points are pinned to the project-local `.venv`.
 
 ---
 
@@ -21,41 +27,51 @@ Audience: anyone with repository access who needs to reproduce or debug a run.
 ## 1. Pipeline Inventory
 
 The repository implements ten operational entry points. The NLP QA report is
-the final model-governance check before any future Gold NLP activation; dbt
-build is also embedded in the news corpus pipeline.
+the model-governance check consumed by Phase 6 Gold NLP marts; dbt build is
+also embedded in the news corpus pipeline.
 
 | Pipeline | Entry point | Produces | Typical runtime |
 |---|---|---|---|
 | **Sampling pipeline** | `make run-sampling-pipeline` | Bronze official data → Silver dims/facts → `gold.candidate_universe` → `gold.sample_leaders` + `sample_manifest.json` | ~2 min (download + DuckDB writes) |
 | **News corpus pipeline** | `make run-news-corpus-pipeline` | `news_source_record` bronze → Silver article/mention tables → dbt Gold marts → Python regression diagnostics → `news_corpus_qa_report.json` | ~5–30 min depending on corpus size and web-scrape flag |
 | **NLP input pipeline** | `make run-nlp-input-pipeline` | Materializes `silver.fact_mention_nlp_input` from existing `fact_mention` and `fact_article` Silver outputs | <30 sec |
-| **NLP lexicon pipeline** | `make run-nlp-lexicon-pipeline` | Materializes `silver.fact_stereotype_word_counts` from Phase 0 NLP input rows and the packaged versioned lexicon | <30 sec |
+| **NLP lexicon pipeline** | `make run-nlp-lexicon-pipeline` | Materializes `silver.fact_stereotype_word_counts`, `silver.fact_trait_word_counts`, and Python-owned Gold trait dashboard artifacts from Phase 0 NLP input rows and packaged versioned lexicons | <30 sec |
 | **NLP sentiment pipeline** | `make run-nlp-sentiment-pipeline` | Materializes `silver.fact_mention_nlp_summary` from Phase 0 NLP input rows and the optional Transformer sentiment model | Depends on CPU/GPU and model cache |
 | **NLP tone pipeline** | `make run-nlp-tone-pipeline` | Enriches `silver.fact_mention_nlp_summary` with target-aware tone from existing Phase 2 summary rows and `gold.sample_leaders` names | Depends on CPU/GPU and model cache |
 | **NLP framing pipeline** | `make run-nlp-framing-pipeline` | Enriches `silver.fact_mention_nlp_summary` with primary frames and materializes `silver.fact_mention_frame_score` | Depends on CPU/GPU and model cache |
 | **NLP tone sensitivity pipeline** | `make run-nlp-tone-sensitivity-pipeline` | Writes a tone threshold QA report and `gold.nlp_tone_threshold_sensitivity` from the Phase 3 summary table | <30 sec |
+| **NLP backup agreement pipeline** | `make run-nlp-backup-agreement-pipeline` | Scores a deterministic governance sample with the backup NLI model and writes `data/gold/nlp_backup_summary_sample.parquet` | Depends on CPU/GPU and model cache |
 | **NLP QA pipeline** | `make run-nlp-qa-pipeline` | Writes `data/gold/nlp_qa_report.json` from Phase 0-4 NLP artifacts without running model inference | <30 sec |
-| **dbt build** (embedded in news corpus) | `make dbt-build` | Refreshes all five Gold dbt mart tables and runs 37 schema tests | ~30 sec |
+| **dbt build** (embedded in news corpus) | `make dbt-build` | Refreshes all six Gold dbt mart tables, including primary-frame and multi-label frame marts, and runs schema tests when Silver NLP tables exist | ~30 sec |
 
 **Dependency contract**: the news corpus pipeline reads `gold.sample_leaders` as its candidate scope.
 The NLP input pipeline reads the Silver article and mention tables produced by the news corpus pipeline.
-The NLP lexicon pipeline reads the Phase 0 NLP input table.
+The NLP lexicon pipeline reads the Phase 0 NLP input table, `gold.sample_leaders`,
+and `gold.mart_exposure_metrics`. The first table supplies mention contexts,
+while the Gold tables supply candidate metadata and article-count outlier
+scenarios for the two-tier trait lexicon report.
 The NLP sentiment pipeline also reads the Phase 0 NLP input table and requires
 the optional future NLP dependency set.
 The NLP tone pipeline reads the Phase 0 input table, the Phase 2 summary table,
 and `gold.sample_leaders` for candidate names.
 The NLP framing pipeline reads the Phase 0 input table and the current NLP
-summary table, then writes full frame-score Silver probabilities without
-activating Gold marts.
+summary table, then writes full frame-score Silver probabilities. Rerun
+`make dbt-build` after Phase 5 QA to promote NLP outputs into
+`gold.mart_primary_frame_metrics`, `gold.mart_framing_metrics`, and
+`gold.mart_bias_indicators`.
 The NLP tone sensitivity pipeline reads the Phase 3 summary and
 `gold.sample_leaders` for gender segmentation. It does not load Transformer
 models.
+The NLP backup agreement pipeline reads current Phase 0 and summary outputs,
+scores a fixed-size sample with the backup NLI model, and writes an optional
+artifact consumed by NLP QA. This is a governance diagnostic, not ground truth.
 The NLP QA pipeline reads Phase 0-4 NLP artifacts and writes a unified
-model-governance report. It does not run Transformer models or activate Gold
-NLP marts.
+model-governance report. It does not run Transformer models; Phase 6 dbt marts
+consume its coverage and caveat outputs for dashboard interpretation.
 Always run sampling, then news corpus, then NLP input, then NLP lexicon and
 sentiment, then NLP tone, then NLP framing, then NLP tone sensitivity, then
-NLP QA.
+NLP backup agreement if governance comparison is required, then NLP QA, then
+dbt build again to activate Phase 6 Gold NLP marts.
 
 ---
 
@@ -141,8 +157,11 @@ make run-nlp-framing-pipeline
 # Step 8 (optional): audit tone coverage across probability thresholds
 make run-nlp-tone-sensitivity-pipeline
 
+# Step 8b (optional): score deterministic backup NLI agreement sample
+make run-nlp-backup-agreement-pipeline
+
 # Step 9 (optional): build the Phase 5 unified NLP QA report
-make run-nlp-qa-pipeline
+python -m src.cli.run_nlp_qa_pipeline --backup-summary-path data/gold/nlp_backup_summary_sample.parquet
 ```
 
 ### Verification after each step
@@ -191,10 +210,15 @@ conn.close()
 
 After the NLP lexicon pipeline:
 ```bash
+make verify-nlp-lexicon
+```
+
+Equivalent manual query:
+```bash
 python -c "
 import duckdb
 conn = duckdb.connect('warehouse/municipal.duckdb')
-summary = conn.execute(\"\"\"
+stereotype_summary = conn.execute(\"\"\"
     SELECT
         COUNT(*) AS rows,
         COUNT(DISTINCT mention_id) AS mentions_with_terms,
@@ -202,9 +226,30 @@ summary = conn.execute(\"\"\"
         SUM(count) AS total_term_count
     FROM silver.fact_stereotype_word_counts
 \"\"\").fetchone()
+trait_summary = conn.execute(\"\"\"
+    SELECT
+        COUNT(*) AS rows,
+        COUNT(DISTINCT mention_id) AS mentions_with_terms,
+        COUNT(DISTINCT trait_category) AS categories_with_terms,
+        SUM(count) AS total_term_count
+    FROM silver.fact_trait_word_counts
+\"\"\").fetchone()
+trait_metric_summary = conn.execute(\"\"\"
+    SELECT
+        COUNT(*) AS metric_rows,
+        COUNT(DISTINCT scenario_id) AS scenarios,
+        COUNT(DISTINCT trait_tier) AS tiers
+    FROM gold.mart_trait_metrics
+\"\"\").fetchone()
 print(
-    f'stereotype rows: {summary[0]}, mentions: {summary[1]}, '
-    f'categories: {summary[2]}, total terms: {summary[3]}'
+    f'stereotype rows: {stereotype_summary[0]}, '
+    f'stereotype mentions: {stereotype_summary[1]}, '
+    f'trait rows: {trait_summary[0]}, '
+    f'trait mentions: {trait_summary[1]}, '
+    f'trait categories: {trait_summary[2]}, '
+    f'trait total terms: {trait_summary[3]}, '
+    f'trait metric rows: {trait_metric_summary[0]}, '
+    f'scenarios: {trait_metric_summary[1]}, tiers: {trait_metric_summary[2]}'
 )
 conn.close()
 "
@@ -320,12 +365,13 @@ print('backup agreement:', report['backup_model_agreement']['status'])
 After dbt build:
 ```bash
 make dbt-build
-# Expect: 5 models pass, 37 tests pass, 0 errors
+# Expect: 6 models pass, schema tests pass, 0 errors
 ```
 
-NLP dbt tests are planned when `fact_mention_frame_score` and NLP summary
-fields feed Gold marts. Phase 0 through Phase 5 are covered by Python contract
-tests because they do not yet feed dbt marts.
+NLP dbt tests are active after Phase 6. They preserve the
+`sample_leaders x 7` row count for both primary-frame and multi-label framing
+marts, accepted frame labels, and unique `gender + metric_name`
+bias-indicator contract.
 
 ---
 
@@ -550,7 +596,7 @@ previous mart state:
 
 1. Reset `gold.sample_leaders` to the desired cohort (re-run sampling pipeline
    with the previous seed).
-2. Run `make dbt-build` — all five marts rebuild from the restored cohort.
+2. Run `make dbt-build` - all six marts rebuild from the restored cohort.
 
 ### Rollback the cohort snapshot
 
@@ -645,6 +691,8 @@ rejection counts with `accepted_record_count` in `meta.meta_news_import_batch`.
 | **No incremental news ingest** | The news corpus pipeline rebuilds all Silver/Gold tables from the full Europresse manifest on each run. Adding new exports re-processes the full history. |
 | **Web-scrape cache is local-only** | `data/bronze/news_web_fetch/` is git-ignored. A fresh clone has no cache; add `--enable-web-scrape` to rebuild it, which requires network access to news sites. |
 | **PLM cities excluded** | Paris, Lyon, Marseille arrondissement candidates are excluded from the analytical cohort. This is documented as a known scope limitation in README. |
-| **Gold NLP activation not implemented** | Phase 0 materializes `silver.fact_mention_nlp_input`, Phase 1 materializes deterministic stereotype lexicon counts, Phase 2 materializes generic sentiment baseline outputs, Phase 3 enriches target-aware tone, Phase 4 materializes Silver frame scores, and Phase 5 writes unified QA. Gold NLP marts remain planned. `mart_framing_metrics` remains a baseline contract until Phase 6 dbt activation and tests are added. |
-| **Tone sensitivity is coverage-only** | `nlp_tone_sensitivity_report.json` varies the probability threshold and reports classified coverage by gender. It does not reconstruct alternate tone-label distributions because low-confidence raw top labels and full NLI probability vectors are not persisted in Silver. |
-| **Seed lexicon is sparse** | The Phase 1 lexicon is a minimal structural-validation seed. Expand and review the vocabulary before interpreting lexicon rates as statistical media-bias evidence. |
+| **NLP outputs are descriptive audit signals** | Phase 0 materializes `silver.fact_mention_nlp_input`, Phase 1 materializes deterministic stereotype and trait lexicon counts, Phase 2 materializes generic sentiment baseline outputs, Phase 3 enriches target-aware tone, Phase 4 materializes Silver frame scores, Phase 5 writes unified QA, and Phase 6 promotes governed NLP metrics into dbt Gold marts. Treat tone, framing, and trait counts as descriptive audit signals, not causal claims. |
+| **NLI safetensors workaround** | The cmarkea NLI model currently requires the `.bin` weight path in local environments. If a future model release publishes stable safetensors weights, remove the `DISABLE_SAFETENSORS_CONVERSION` workaround after validating the model bundle hash and regression tests. |
+| **Tone sensitivity is coverage-first** | `nlp_tone_sensitivity_report.json` varies the probability threshold and reports classified coverage by gender. It also exposes top-probability bins by persisted current label for dashboard review. It does not reconstruct alternate low-threshold tone labels because full NLI probability vectors are not persisted in Silver. |
+| **Trait lexicon tiers require evidence labels** | The `core` trait tier is the high-precision interpretation layer. The `exploratory` tier improves discovery coverage but must be read with QA samples and the `evidence_level` flag; categories below 30 hit mentions are sparse, and categories below 10 hit mentions should remain table-only. |
+| **Small-n winsorization caveat** | For cohorts smaller than roughly 40 leaders, the p95 winsorized cap can be very close to the maximum value and may effectively cap only one row. Interpret winsorized means alongside drop-top and median scenarios. |

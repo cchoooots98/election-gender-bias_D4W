@@ -1,4 +1,4 @@
-"""Stratified matched sampling for the active metropolitan analysis cohort.
+"""Stratified quota sampling for the active metropolitan analysis cohort.
 
 This module materializes the Gold cohort used to scope downstream news
 collection and bias analysis.
@@ -8,10 +8,10 @@ Why not simple random sampling:
   draw would over-sample small-commune women and large-commune men, confounding
   gender with city size and local media ecology.
 
-Why matched stratified sampling:
+Why stratified sampling with a gender quota:
   We enforce gender balance within each city-size stratum so that comparisons
-  remain interpretable after controlling for commune scale. This mirrors the
-  matched-design logic used in social-science studies.
+  remain interpretable after accounting for commune scale. This is not 1:1
+  matching; it is a quota design with explicit reproducibility checks.
 
 Current hard cohort contract (configured in settings.py):
   large   -> SAMPLE_LARGE_TOTAL
@@ -1838,7 +1838,7 @@ def build_sample(
     random_seed: int = SAMPLING_RANDOM_SEED,
     pipeline_run_id: str | None = None,
 ) -> pd.DataFrame:
-    """Execute stratified matched sampling and write outputs.
+    """Execute stratified quota sampling and write outputs.
 
     Reads gold.candidate_universe, applies the sampling algorithm, validates
     constraints, and writes:
