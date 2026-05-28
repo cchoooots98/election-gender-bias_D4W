@@ -33,13 +33,19 @@ if PerfectSeparationError is not None:
 
 _REGRESSION_RESULT_COLUMNS = [
     "model_name",
+    "model_role",
     "dependent_variable",
     "variable_name",
     "coefficient",
     "std_error",
     "p_value",
+    "q_value",
     "status",
+    "inference_status",
+    "is_publishable",
     "sample_size",
+    "parameter_count",
+    "excluded_missing_control_count",
     "fitted_at",
 ]
 _BOOTSTRAP_CI_COLUMNS = [
@@ -58,26 +64,48 @@ _BOOTSTRAP_CI_COLUMNS = [
 # Population is the log-offset denominator; floor at 1 to keep zero-population
 # edge cases auditable without producing an infinite offset.
 _OFFSET_POPULATION_FLOOR = 1
-# Sparse region dummies are collapsed before bootstrap so repeated resamples do
-# not create singular design matrices from singleton regional cells.
-_SPARSE_REGION_MIN_OBSERVATIONS = 3
 _BOOTSTRAP_PROGRESS_LOG_INTERVAL = 500
 _MIN_BOOTSTRAP_SAMPLES_FOR_CI = 50
+_PLACEBO_RANDOM_SEED = 20260527
+_PRIMARY_MODEL_ROLE = "Primary model"
+_DIAGNOSTIC_MODEL_ROLE = "Diagnostic only"
+_SENSITIVITY_MODEL_ROLE = "Sensitivity model"
+_PLACEBO_MODEL_ROLE = "Placebo check"
 
 
-def _build_regression_design_matrix(modeling_df: pd.DataFrame) -> pd.DataFrame:
-    """Build the documented regression controls in one deterministic place."""
-    exog_df = pd.DataFrame(
+def _build_primary_design_matrix(modeling_df: pd.DataFrame) -> pd.DataFrame:
+    """Build the low-dimensional primary exposure model design matrix."""
+    return pd.DataFrame(
         {
             "const": 1.0,
             "gender_female": modeling_df["gender_female"].astype(float),
             "is_incumbent": modeling_df["is_incumbent"].astype(float),
-            "won_final_round": modeling_df["won_final_round"].astype(float),
-            "bucket_large": (modeling_df["city_size_bucket"] == "large").astype(float),
-            "bucket_medium": (modeling_df["city_size_bucket"] == "medium").astype(
-                float
-            ),
         }
+    )
+
+
+def _build_placebo_design_matrix(modeling_df: pd.DataFrame) -> pd.DataFrame:
+    """Build the fixed-seed placebo design matrix."""
+    rng = np.random.default_rng(_PLACEBO_RANDOM_SEED)
+    placebo_gender = rng.permutation(
+        modeling_df["gender_female"].astype(int).to_numpy()
+    )
+    return pd.DataFrame(
+        {
+            "const": 1.0,
+            "gender_female_placebo": placebo_gender.astype(float),
+            "is_incumbent": modeling_df["is_incumbent"].astype(float),
+        }
+    )
+
+
+def _build_sensitivity_design_matrix(modeling_df: pd.DataFrame) -> pd.DataFrame:
+    """Build the appendix full-control design matrix."""
+    exog_df = _build_primary_design_matrix(modeling_df)
+    exog_df["won_final_round"] = modeling_df["won_final_round"].astype(float)
+    exog_df["bucket_large"] = (modeling_df["city_size_bucket"] == "large").astype(float)
+    exog_df["bucket_medium"] = (modeling_df["city_size_bucket"] == "medium").astype(
+        float
     )
 
     nuance_categories = sorted(
@@ -118,9 +146,11 @@ def _build_regression_design_matrix(modeling_df: pd.DataFrame) -> pd.DataFrame:
 def _build_unfitted_regression_rows(
     *,
     model_name: str,
+    model_role: str,
     exog_df: pd.DataFrame,
     status: str,
     sample_size: int,
+    excluded_missing_control_count: int,
     fitted_at: str,
 ) -> pd.DataFrame:
     """Return auditable model rows even when coefficients cannot be estimated."""
@@ -129,26 +159,104 @@ def _build_unfitted_regression_rows(
         result_rows.append(
             {
                 "model_name": model_name,
+                "model_role": model_role,
                 "dependent_variable": "article_count",
                 "variable_name": variable_name,
                 "coefficient": None,
                 "std_error": None,
                 "p_value": None,
+                "q_value": None,
                 "status": status,
+                "inference_status": "not_fitted",
+                "is_publishable": False,
                 "sample_size": sample_size,
+                "parameter_count": len(exog_df.columns),
+                "excluded_missing_control_count": excluded_missing_control_count,
                 "fitted_at": fitted_at,
             }
         )
     return pd.DataFrame(result_rows, columns=_REGRESSION_RESULT_COLUMNS)
 
 
+def _build_unfitted_regression_result_set(
+    *,
+    modeling_df: pd.DataFrame,
+    regression_feature_base_df: pd.DataFrame,
+    status: str,
+    excluded_missing_control_count: int,
+    fitted_at: str,
+) -> pd.DataFrame:
+    """Return all planned model rows when fitting cannot run."""
+    primary_exog_df = _build_primary_design_matrix(modeling_df)
+    result_frames = [
+        _build_unfitted_regression_rows(
+            model_name="poisson_exposure",
+            model_role=_DIAGNOSTIC_MODEL_ROLE,
+            exog_df=primary_exog_df,
+            status=status,
+            sample_size=len(modeling_df),
+            excluded_missing_control_count=excluded_missing_control_count,
+            fitted_at=fitted_at,
+        ),
+        _build_unfitted_regression_rows(
+            model_name="negbinom_exposure",
+            model_role=_PRIMARY_MODEL_ROLE,
+            exog_df=primary_exog_df,
+            status=status,
+            sample_size=len(modeling_df),
+            excluded_missing_control_count=excluded_missing_control_count,
+            fitted_at=fitted_at,
+        ),
+        _build_unfitted_regression_rows(
+            model_name="negbinom_exposure_placebo",
+            model_role=_PLACEBO_MODEL_ROLE,
+            exog_df=_build_placebo_design_matrix(modeling_df),
+            status=status,
+            sample_size=len(modeling_df),
+            excluded_missing_control_count=excluded_missing_control_count,
+            fitted_at=fitted_at,
+        ),
+    ]
+
+    sensitivity_required_columns = (
+        "article_count",
+        "population",
+        "gender_female",
+        "is_incumbent",
+        "won_final_round",
+        "city_size_bucket",
+        "nuance_group",
+        "reg_code",
+    )
+    sensitivity_modeling_df, sensitivity_excluded_count = _prepare_modeling_dataframe(
+        regression_feature_base_df,
+        required_columns=sensitivity_required_columns,
+    )
+    if set(sensitivity_required_columns).issubset(regression_feature_base_df.columns):
+        result_frames.append(
+            _build_unfitted_regression_rows(
+                model_name="negbinom_exposure_full_controls",
+                model_role=_SENSITIVITY_MODEL_ROLE,
+                exog_df=_build_sensitivity_design_matrix(sensitivity_modeling_df),
+                status=status,
+                sample_size=len(sensitivity_modeling_df),
+                excluded_missing_control_count=sensitivity_excluded_count,
+                fitted_at=fitted_at,
+            )
+        )
+
+    return pd.concat(result_frames, ignore_index=True)[_REGRESSION_RESULT_COLUMNS]
+
+
 def _fit_count_model(
     *,
     model_name: str,
+    model_role: str,
     endog: pd.Series,
     exog_df: pd.DataFrame,
     offset: pd.Series,
     family: object,
+    excluded_missing_control_count: int,
     fitted_at: str,
 ) -> pd.DataFrame:
     """Fit one generalized linear count model and return tidy results."""
@@ -162,9 +270,11 @@ def _fit_count_model(
         logger.warning("Model fit failed model=%s error=%r", model_name, exc)
         return _build_unfitted_regression_rows(
             model_name=model_name,
+            model_role=model_role,
             exog_df=exog_df,
             status=f"fit_failed:{type(exc).__name__}",
             sample_size=sample_size,
+            excluded_missing_control_count=excluded_missing_control_count,
             fitted_at=fitted_at,
         )
 
@@ -186,13 +296,19 @@ def _fit_count_model(
         result_rows.append(
             {
                 "model_name": model_name,
+                "model_role": model_role,
                 "dependent_variable": "article_count",
                 "variable_name": variable_name,
                 "coefficient": float(coefficient),
                 "std_error": float(fit_result.bse.get(variable_name, np.nan)),
                 "p_value": float(fit_result.pvalues.get(variable_name, np.nan)),
+                "q_value": None,
                 "status": fit_status,
+                "inference_status": "pending_q_value",
+                "is_publishable": False,
                 "sample_size": sample_size,
+                "parameter_count": len(exog_df.columns),
+                "excluded_missing_control_count": excluded_missing_control_count,
                 "fitted_at": fitted_at,
             }
         )
@@ -202,18 +318,112 @@ def _fit_count_model(
         result_rows.append(
             {
                 "model_name": model_name,
+                "model_role": model_role,
                 "dependent_variable": "article_count",
                 "variable_name": "_dispersion_ratio",
                 "coefficient": dispersion_ratio,
                 "std_error": None,
                 "p_value": None,
+                "q_value": None,
                 "status": fit_status,
+                "inference_status": "diagnostic",
+                "is_publishable": False,
                 "sample_size": sample_size,
+                "parameter_count": len(exog_df.columns),
+                "excluded_missing_control_count": excluded_missing_control_count,
                 "fitted_at": fitted_at,
             }
         )
 
     return pd.DataFrame(result_rows, columns=_REGRESSION_RESULT_COLUMNS)
+
+
+def _prepare_modeling_dataframe(
+    regression_feature_base_df: pd.DataFrame,
+    *,
+    required_columns: tuple[str, ...],
+) -> tuple[pd.DataFrame, int]:
+    """Drop rows with missing required modeling controls and return the count."""
+    modeling_df = regression_feature_base_df.copy()
+    missing_required = modeling_df.loc[:, list(required_columns)].isna().any(axis=1)
+    excluded_count = int(missing_required.sum())
+    if excluded_count:
+        logger.warning(
+            "Regression excluded rows with missing controls count=%d columns=%s",
+            excluded_count,
+            required_columns,
+        )
+    return modeling_df.loc[~missing_required].reset_index(drop=True), excluded_count
+
+
+def _population_offset(modeling_df: pd.DataFrame) -> pd.Series:
+    """Return the log-population offset used by exposure count models."""
+    return np.log(
+        modeling_df["population"].clip(lower=_OFFSET_POPULATION_FLOOR).astype(float)
+    )
+
+
+def _apply_benjamini_hochberg_q_values(regression_df: pd.DataFrame) -> pd.DataFrame:
+    """Add Benjamini-Hochberg q-values to fitted coefficient rows."""
+    if regression_df.empty:
+        return regression_df
+    result_df = regression_df.copy()
+    result_df["q_value"] = None
+    p_value_series = pd.to_numeric(result_df["p_value"], errors="coerce")
+    valid_mask = p_value_series.notna()
+    if not valid_mask.any():
+        return result_df[_REGRESSION_RESULT_COLUMNS]
+
+    valid_p_values = p_value_series.loc[valid_mask].astype(float)
+    ordered_indices = valid_p_values.sort_values(ascending=False).index.tolist()
+    total_tests = len(valid_p_values)
+    running_min = 1.0
+    q_values_by_index: dict[object, float] = {}
+    for reverse_rank, row_index in enumerate(ordered_indices, start=1):
+        rank = total_tests - reverse_rank + 1
+        adjusted_value = float(valid_p_values.loc[row_index]) * total_tests / rank
+        running_min = min(running_min, adjusted_value)
+        q_values_by_index[row_index] = min(running_min, 1.0)
+    for row_index, q_value in q_values_by_index.items():
+        result_df.at[row_index, "q_value"] = q_value
+    return result_df[_REGRESSION_RESULT_COLUMNS]
+
+
+def _apply_regression_publishability_flags(
+    regression_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add machine-readable inference status for downstream governance."""
+    if regression_df.empty:
+        return regression_df
+    result_df = regression_df.copy()
+    result_df["inference_status"] = "not_publishable"
+    result_df["is_publishable"] = False
+
+    fitted_mask = result_df["status"].astype(str).str.startswith("fitted")
+    diagnostic_mask = result_df["variable_name"].astype(str).eq("_dispersion_ratio")
+    intercept_mask = result_df["variable_name"].astype(str).eq("const")
+    poisson_mask = result_df["model_name"].astype(str).eq("poisson_exposure")
+    placebo_mask = result_df["model_name"].astype(str).eq("negbinom_exposure_placebo")
+    q_value_series = pd.to_numeric(result_df["q_value"], errors="coerce")
+    coefficient_mask = (
+        fitted_mask
+        & ~diagnostic_mask
+        & ~intercept_mask
+        & ~poisson_mask
+        & ~placebo_mask
+        & q_value_series.notna()
+    )
+
+    result_df.loc[diagnostic_mask, "inference_status"] = "diagnostic"
+    result_df.loc[intercept_mask & fitted_mask, "inference_status"] = "intercept"
+    result_df.loc[poisson_mask & fitted_mask, "inference_status"] = "diagnostic_only"
+    result_df.loc[placebo_mask & fitted_mask, "inference_status"] = "placebo_check"
+    result_df.loc[coefficient_mask, "inference_status"] = "inconclusive"
+
+    publishable_mask = coefficient_mask & q_value_series.le(0.05)
+    result_df.loc[publishable_mask, "inference_status"] = "publishable_signal"
+    result_df.loc[publishable_mask, "is_publishable"] = True
+    return result_df[_REGRESSION_RESULT_COLUMNS]
 
 
 def build_mart_regression_results(
@@ -233,54 +443,107 @@ def build_mart_regression_results(
     if regression_feature_base_df.empty:
         return pd.DataFrame(columns=_REGRESSION_RESULT_COLUMNS)
 
-    modeling_df = regression_feature_base_df.copy()
-    exog_df = _build_regression_design_matrix(modeling_df)
+    primary_required_columns = (
+        "article_count",
+        "population",
+        "gender_female",
+        "is_incumbent",
+    )
+    modeling_df, excluded_count = _prepare_modeling_dataframe(
+        regression_feature_base_df,
+        required_columns=primary_required_columns,
+    )
+    exog_df = _build_primary_design_matrix(modeling_df)
 
     if sm is None:
-        return _build_unfitted_regression_rows(
-            model_name="poisson_exposure",
-            exog_df=exog_df,
+        return _build_unfitted_regression_result_set(
+            modeling_df=modeling_df,
+            regression_feature_base_df=regression_feature_base_df,
             status="not_fitted_missing_statsmodels",
-            sample_size=len(modeling_df),
+            excluded_missing_control_count=excluded_count,
             fitted_at=fitted_at,
         )
 
-    if modeling_df["article_count"].sum() == 0:
-        return _build_unfitted_regression_rows(
-            model_name="poisson_exposure",
-            exog_df=exog_df,
+    if modeling_df.empty or modeling_df["article_count"].sum() == 0:
+        return _build_unfitted_regression_result_set(
+            modeling_df=modeling_df,
+            regression_feature_base_df=regression_feature_base_df,
             status="not_fitted_zero_articles",
-            sample_size=len(modeling_df),
+            excluded_missing_control_count=excluded_count,
             fitted_at=fitted_at,
         )
 
     endog = modeling_df["article_count"].astype(float)
-    exposure_offset = np.log(
-        modeling_df["population"].clip(lower=_OFFSET_POPULATION_FLOOR).astype(float)
-    )
+    exposure_offset = _population_offset(modeling_df)
 
     poisson_df = _fit_count_model(
         model_name="poisson_exposure",
+        model_role=_DIAGNOSTIC_MODEL_ROLE,
         endog=endog,
         exog_df=exog_df,
         offset=exposure_offset,
         family=sm.families.Poisson(),
+        excluded_missing_control_count=excluded_count,
         fitted_at=fitted_at,
     )
     negbinom_df = _fit_count_model(
         model_name="negbinom_exposure",
+        model_role=_PRIMARY_MODEL_ROLE,
         endog=endog,
         exog_df=exog_df,
         offset=exposure_offset,
         family=sm.families.NegativeBinomial(),
+        excluded_missing_control_count=excluded_count,
         fitted_at=fitted_at,
     )
+    placebo_df = _fit_count_model(
+        model_name="negbinom_exposure_placebo",
+        model_role=_PLACEBO_MODEL_ROLE,
+        endog=endog,
+        exog_df=_build_placebo_design_matrix(modeling_df),
+        offset=exposure_offset,
+        family=sm.families.NegativeBinomial(),
+        excluded_missing_control_count=excluded_count,
+        fitted_at=fitted_at,
+    )
+    sensitivity_required_columns = (
+        *primary_required_columns,
+        "won_final_round",
+        "city_size_bucket",
+        "nuance_group",
+        "reg_code",
+    )
+    sensitivity_modeling_df, sensitivity_excluded_count = _prepare_modeling_dataframe(
+        regression_feature_base_df,
+        required_columns=sensitivity_required_columns,
+    )
+    if sensitivity_modeling_df.empty:
+        sensitivity_df = pd.DataFrame(columns=_REGRESSION_RESULT_COLUMNS)
+    else:
+        sensitivity_df = _fit_count_model(
+            model_name="negbinom_exposure_full_controls",
+            model_role=_SENSITIVITY_MODEL_ROLE,
+            endog=sensitivity_modeling_df["article_count"].astype(float),
+            exog_df=_build_sensitivity_design_matrix(sensitivity_modeling_df),
+            offset=_population_offset(sensitivity_modeling_df),
+            family=sm.families.NegativeBinomial(),
+            excluded_missing_control_count=sensitivity_excluded_count,
+            fitted_at=fitted_at,
+        )
 
-    combined_df = pd.concat([poisson_df, negbinom_df], ignore_index=True)
+    combined_df = pd.concat(
+        [poisson_df, negbinom_df, placebo_df, sensitivity_df],
+        ignore_index=True,
+    )
+    combined_df = _apply_benjamini_hochberg_q_values(combined_df)
+    combined_df = _apply_regression_publishability_flags(combined_df)
     logger.info(
-        "Regression diagnostics built poisson_rows=%d negbinom_rows=%d",
+        "Regression diagnostics built poisson_rows=%d negbinom_rows=%d "
+        "placebo_rows=%d sensitivity_rows=%d",
         len(poisson_df),
         len(negbinom_df),
+        len(placebo_df),
+        len(sensitivity_df),
     )
     return combined_df[_REGRESSION_RESULT_COLUMNS].copy()
 
@@ -312,31 +575,28 @@ def build_mart_bootstrap_ci(
         )
         return pd.DataFrame(columns=_BOOTSTRAP_CI_COLUMNS)
 
-    modeling_df = regression_feature_base_df.copy()
-
-    reg_counts = modeling_df["reg_code"].value_counts()
-    sparse_regions = set(
-        reg_counts[reg_counts < _SPARSE_REGION_MIN_OBSERVATIONS].index.astype(str)
+    modeling_df, excluded_count = _prepare_modeling_dataframe(
+        regression_feature_base_df,
+        required_columns=(
+            "article_count",
+            "population",
+            "gender_female",
+            "is_incumbent",
+        ),
     )
-    if sparse_regions:
-        modeling_df = modeling_df.copy()
-        modeling_df["reg_code"] = modeling_df["reg_code"].apply(
-            lambda region_code: (
-                "other" if str(region_code) in sparse_regions else region_code
-            )
+    if modeling_df.empty:
+        logger.warning(
+            "Bootstrap CI skipped: all rows excluded by missing primary controls"
         )
-        logger.info(
-            "Bootstrap collapsed sparse regions into reg_other regions=%s",
-            sorted(sparse_regions),
-        )
+        return pd.DataFrame(columns=_BOOTSTRAP_CI_COLUMNS)
 
-    exog_df = _build_regression_design_matrix(modeling_df)
+    exog_df = _build_primary_design_matrix(modeling_df)
     endog = modeling_df["article_count"].astype(float)
-    offset = np.log(
-        modeling_df["population"].clip(lower=_OFFSET_POPULATION_FLOOR).astype(float)
-    )
+    offset = _population_offset(modeling_df)
     variable_names = exog_df.columns.tolist()
     n_obs = len(modeling_df)
+    if excluded_count:
+        logger.info("Bootstrap excluded missing-control rows count=%d", excluded_count)
 
     try:
         observed_result = sm.GLM(
